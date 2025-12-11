@@ -115,12 +115,12 @@ int OnInit()
    if(InpShowPanel)
       CreatePanel();
 
-   // Draw EMA lines
+   // Run initial analysis FIRST (fills buffers)
+   AnalyzeEMA();
+
+   // Draw EMA lines AFTER analysis
    if(InpShowEMALines)
       DrawEMALines();
-
-   // Run initial analysis
-   AnalyzeEMA();
 
    return(INIT_SUCCEEDED);
 }
@@ -713,10 +713,22 @@ void DrawEMALines()
 {
    if(!InpShowEMALines) return;
 
-   int barsToShow = MathMin(InpHistoryBars, ArraySize(g_emaFastBuffer));
+   // Check if buffers have data
+   int fastSize = ArraySize(g_emaFastBuffer);
+   int slowSize = ArraySize(g_emaSlowBuffer);
+
+   if(fastSize < 2 || slowSize < 2)
+   {
+      Print("DrawEMALines: Waiting for buffer data...");
+      return;
+   }
+
+   int barsToShow = MathMin(InpHistoryBars, MathMin(fastSize, slowSize));
 
    // Remove old lines
    ObjectsDeleteAll(0, "EMA_Line_");
+   ObjectDelete(0, "EMA_Label_Fast");
+   ObjectDelete(0, "EMA_Label_Slow");
 
    // Draw EMA lines using trend lines between points
    for(int i = 0; i < barsToShow - 1; i++)
