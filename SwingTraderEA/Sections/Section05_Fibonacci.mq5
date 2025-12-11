@@ -620,44 +620,40 @@ string GetPriceFibPosition(double price)
    if(!g_fibValid || g_fibLevelCount < 2)
       return "N/A";
 
-   // Find which levels price is between
-   for(int i = 0; i < g_fibLevelCount - 1; i++)
-   {
-      double upper = MathMax(g_fibLevels[i], g_fibLevels[i+1]);
-      double lower = MathMin(g_fibLevels[i], g_fibLevels[i+1]);
+   // Find the nearest level ABOVE and BELOW current price
+   double nearestAbove = DBL_MAX;
+   double nearestBelow = -DBL_MAX;
+   string labelAbove = "";
+   string labelBelow = "";
 
-      if(price >= lower && price <= upper)
+   for(int i = 0; i < g_fibLevelCount; i++)
+   {
+      if(g_fibLevels[i] >= price && g_fibLevels[i] < nearestAbove)
       {
-         return "Between " + g_fibLabels[i] + " and " + g_fibLabels[i+1];
+         nearestAbove = g_fibLevels[i];
+         labelAbove = g_fibLabels[i];
+      }
+      if(g_fibLevels[i] <= price && g_fibLevels[i] > nearestBelow)
+      {
+         nearestBelow = g_fibLevels[i];
+         labelBelow = g_fibLabels[i];
       }
    }
 
-   // Check if above all or below all
-   double highest = g_fibLevels[0];
-   double lowest = g_fibLevels[0];
-   string highLabel = g_fibLabels[0];
-   string lowLabel = g_fibLabels[0];
+   // Check if price is exactly at a level
+   if(MathAbs(nearestAbove - nearestBelow) < g_point * 10)
+      return "At " + labelAbove;
 
-   for(int i = 1; i < g_fibLevelCount; i++)
-   {
-      if(g_fibLevels[i] > highest)
-      {
-         highest = g_fibLevels[i];
-         highLabel = g_fibLabels[i];
-      }
-      if(g_fibLevels[i] < lowest)
-      {
-         lowest = g_fibLevels[i];
-         lowLabel = g_fibLabels[i];
-      }
-   }
+   // Check if above all levels
+   if(nearestAbove == DBL_MAX)
+      return "Above " + labelBelow;
 
-   if(price > highest)
-      return "Above " + highLabel;
-   if(price < lowest)
-      return "Below " + lowLabel;
+   // Check if below all levels
+   if(nearestBelow == -DBL_MAX)
+      return "Below " + labelAbove;
 
-   return "At Fib level";
+   // Price is between two levels
+   return "Between " + labelBelow + " and " + labelAbove;
 }
 
 //+------------------------------------------------------------------+
@@ -801,6 +797,8 @@ void PrintTradingRecommendation(double currentPrice)
    }
 
    double range = g_fibSwingHigh - g_fibSwingLow;
+   double fib236 = (g_fibDirection == BIAS_BULLISH) ?
+                   g_fibSwingHigh - range * 0.236 : g_fibSwingLow + range * 0.236;
    double fib382 = (g_fibDirection == BIAS_BULLISH) ?
                    g_fibSwingHigh - range * 0.382 : g_fibSwingLow + range * 0.382;
    double fib618 = (g_fibDirection == BIAS_BULLISH) ?
@@ -811,11 +809,23 @@ void PrintTradingRecommendation(double currentPrice)
    if(g_fibDirection == BIAS_BULLISH)
    {
       // Bullish: Look for buy entries at retracement levels
-      if(currentPrice >= fib382 && currentPrice <= g_fibSwingHigh)
+      if(currentPrice > g_fibSwingHigh)
+      {
+         Print("  STATUS: BREAKOUT");
+         Print("  REASON: Price above swing high");
+         Print("  ACTION: Look for extension targets (127.2%, 161.8%)");
+      }
+      else if(currentPrice >= fib236 && currentPrice <= g_fibSwingHigh)
+      {
+         Print("  STATUS: VERY SHALLOW PULLBACK");
+         Print("  REASON: Price at 0-23.6% retracement");
+         Print("  ACTION: Strong trend, wait for deeper pullback or breakout");
+      }
+      else if(currentPrice >= fib382 && currentPrice < fib236)
       {
          Print("  STATUS: SHALLOW PULLBACK");
-         Print("  REASON: Price at 0-38.2% retracement");
-         Print("  ACTION: Strong trend, wait for deeper pullback or breakout");
+         Print("  REASON: Price at 23.6-38.2% retracement");
+         Print("  ACTION: Approaching buy zone, prepare for entry");
       }
       else if(currentPrice >= fib618 && currentPrice < fib382)
       {
@@ -835,21 +845,27 @@ void PrintTradingRecommendation(double currentPrice)
          Print("  REASON: Price below 78.6% - trend may be reversing");
          Print("  ACTION: Wait for structure confirmation");
       }
-      else if(currentPrice > g_fibSwingHigh)
-      {
-         Print("  STATUS: BREAKOUT");
-         Print("  REASON: Price above swing high");
-         Print("  ACTION: Look for extension targets (127.2%, 161.8%)");
-      }
    }
    else // BEARISH
    {
       // Bearish: Look for sell entries at retracement levels
-      if(currentPrice <= fib382 && currentPrice >= g_fibSwingLow)
+      if(currentPrice < g_fibSwingLow)
+      {
+         Print("  STATUS: BREAKOUT");
+         Print("  REASON: Price below swing low");
+         Print("  ACTION: Look for extension targets (127.2%, 161.8%)");
+      }
+      else if(currentPrice <= fib236 && currentPrice >= g_fibSwingLow)
+      {
+         Print("  STATUS: VERY SHALLOW PULLBACK");
+         Print("  REASON: Price at 0-23.6% retracement");
+         Print("  ACTION: Strong trend, wait for deeper pullback or breakout");
+      }
+      else if(currentPrice <= fib382 && currentPrice > fib236)
       {
          Print("  STATUS: SHALLOW PULLBACK");
-         Print("  REASON: Price at 0-38.2% retracement");
-         Print("  ACTION: Strong trend, wait for deeper pullback or breakout");
+         Print("  REASON: Price at 23.6-38.2% retracement");
+         Print("  ACTION: Approaching sell zone, prepare for entry");
       }
       else if(currentPrice <= fib618 && currentPrice > fib382)
       {
@@ -868,12 +884,6 @@ void PrintTradingRecommendation(double currentPrice)
          Print("  STATUS: CAUTION");
          Print("  REASON: Price above 78.6% - trend may be reversing");
          Print("  ACTION: Wait for structure confirmation");
-      }
-      else if(currentPrice < g_fibSwingLow)
-      {
-         Print("  STATUS: BREAKOUT");
-         Print("  REASON: Price below swing low");
-         Print("  ACTION: Look for extension targets (127.2%, 161.8%)");
       }
    }
 }
