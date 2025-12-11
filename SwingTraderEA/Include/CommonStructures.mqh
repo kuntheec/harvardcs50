@@ -321,42 +321,10 @@ struct EASettings
 };
 
 //+------------------------------------------------------------------+
-//| Helper Functions Declarations                                     |
+//| Helper Functions                                                  |
 //+------------------------------------------------------------------+
 
 // Convert pips to points
-double PipsToPoints(string symbol, double pips);
-
-// Convert points to pips
-double PointsToPips(string symbol, double points);
-
-// Get pip value
-double GetPipValue(string symbol);
-
-// Format price for display
-string FormatPrice(double price, int digits);
-
-// Format lot size
-string FormatLots(double lots);
-
-// Get timeframe as string
-string TimeframeToString(ENUM_TIMEFRAMES tf);
-
-// Market condition to string
-string MarketConditionToString(ENUM_MARKET_CONDITION condition);
-
-// Trend bias to string
-string TrendBiasToString(ENUM_TREND_BIAS bias);
-
-// Structure type to string
-string StructureTypeToString(ENUM_STRUCTURE_TYPE type);
-
-// Signal strength to string
-string SignalStrengthToString(ENUM_SIGNAL_STRENGTH strength);
-
-//+------------------------------------------------------------------+
-//| Helper Functions Implementation                                   |
-//+------------------------------------------------------------------+
 double PipsToPoints(string symbol, double pips)
 {
    int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
