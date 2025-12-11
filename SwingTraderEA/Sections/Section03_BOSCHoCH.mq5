@@ -19,8 +19,8 @@
 //| Input Parameters                                                  |
 //+------------------------------------------------------------------+
 input group "=== Structure Detection Settings ==="
-input int      InpSwingLookback       = 5;        // Swing Detection Lookback (bars each side)
-input int      InpBOSLookback         = 30;       // BOS/CHoCH Lookback (candles)
+input int      InpSwingLookback       = 3;        // Swing Detection Lookback (bars each side)
+input int      InpBOSLookback         = 50;       // BOS/CHoCH Lookback (candles)
 input bool     InpRequireClose        = true;     // Require Candle Close for Confirmation
 input ENUM_TIMEFRAMES InpStructureTF  = PERIOD_H4; // Structure Analysis Timeframe
 
