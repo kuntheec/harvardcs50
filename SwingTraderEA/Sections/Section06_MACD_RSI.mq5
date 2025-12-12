@@ -212,6 +212,10 @@ int OnInit()
    // Run initial analysis
    AnalyzeMomentum();
 
+   // Update panel with initial values
+   if(InpShowPanel)
+      UpdatePanel();
+
    return(INIT_SUCCEEDED);
 }
 
