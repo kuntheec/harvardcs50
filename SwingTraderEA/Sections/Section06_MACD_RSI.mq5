@@ -260,19 +260,31 @@ void OnTick()
 void AnalyzeMomentum()
 {
    int barsNeeded = InpDivergenceLookback + 10;
+   int minBars = 5;  // Minimum bars needed for basic analysis
 
-   // Copy MACD data
-   if(CopyBuffer(g_macdHandle, 0, 0, barsNeeded, g_macdMainBuffer) < barsNeeded) return;
-   if(CopyBuffer(g_macdHandle, 1, 0, barsNeeded, g_macdSignalBuffer) < barsNeeded) return;
-   if(CopyBuffer(g_macdHandle, 2, 0, barsNeeded, g_macdHistBuffer) < barsNeeded) return;
+   // Copy MACD data - try with minimum bars if full copy fails
+   int macdCopied = CopyBuffer(g_macdHandle, 0, 0, barsNeeded, g_macdMainBuffer);
+   if(macdCopied < minBars)
+   {
+      Print("WARNING: MACD data not ready yet (copied: ", macdCopied, ")");
+      return;
+   }
+
+   if(CopyBuffer(g_macdHandle, 1, 0, macdCopied, g_macdSignalBuffer) < minBars) return;
+   if(CopyBuffer(g_macdHandle, 2, 0, macdCopied, g_macdHistBuffer) < minBars) return;
 
    // Copy RSI data
-   if(CopyBuffer(g_rsiHandle, 0, 0, barsNeeded, g_rsiBuffer) < barsNeeded) return;
+   int rsiCopied = CopyBuffer(g_rsiHandle, 0, 0, macdCopied, g_rsiBuffer);
+   if(rsiCopied < minBars)
+   {
+      Print("WARNING: RSI data not ready yet (copied: ", rsiCopied, ")");
+      return;
+   }
 
    // Copy price data for divergence detection
-   if(CopyHigh(_Symbol, InpMACDTimeframe, 0, barsNeeded, g_highBuffer) < barsNeeded) return;
-   if(CopyLow(_Symbol, InpMACDTimeframe, 0, barsNeeded, g_lowBuffer) < barsNeeded) return;
-   if(CopyClose(_Symbol, InpMACDTimeframe, 0, barsNeeded, g_closeBuffer) < barsNeeded) return;
+   if(CopyHigh(_Symbol, InpMACDTimeframe, 0, macdCopied, g_highBuffer) < minBars) return;
+   if(CopyLow(_Symbol, InpMACDTimeframe, 0, macdCopied, g_lowBuffer) < minBars) return;
+   if(CopyClose(_Symbol, InpMACDTimeframe, 0, macdCopied, g_closeBuffer) < minBars) return;
 
    // Analyze ATR if enabled
    if(InpUseATRFilter)
