@@ -664,61 +664,76 @@ void GenerateRecommendation()
    }
 
    string rec = "";
+   double rsiVal = g_analysis.rsi.rsiValue;
+   bool bullishCross = (g_analysis.macd.signal == MACD_BULLISH_CROSS);
+   bool bearishCross = (g_analysis.macd.signal == MACD_BEARISH_CROSS);
 
-   // Strong bullish signals
-   if(g_analysis.macd.signal == MACD_BULLISH_CROSS && g_analysis.rsi.condition == RSI_OVERSOLD)
+   // === CROSSOVER-BASED SIGNALS (Highest Priority) ===
+
+   // Strong bullish: Bullish cross + RSI < 40 (Grok's recommendation)
+   if(bullishCross && rsiVal < 40)
    {
-      rec = "STRONG BUY - MACD bullish cross + RSI oversold";
+      rec = "STRONG BUY - MACD bullish cross + RSI low (<40)";
    }
-   else if(g_analysis.macd.signal == MACD_BULLISH_CROSS && g_analysis.divergence.macdDivergence == DIV_BULLISH_REGULAR)
+   // Strong bullish: Bullish cross + Divergence
+   else if(bullishCross && g_analysis.divergence.macdDivergence == DIV_BULLISH_REGULAR)
    {
       rec = "STRONG BUY - MACD bullish cross + Bullish divergence";
    }
-   // Strong bearish signals
-   else if(g_analysis.macd.signal == MACD_BEARISH_CROSS && g_analysis.rsi.condition == RSI_OVERBOUGHT)
+   // Standard bullish cross
+   else if(bullishCross)
    {
-      rec = "STRONG SELL - MACD bearish cross + RSI overbought";
+      rec = "BUY - MACD bullish crossover";
    }
-   else if(g_analysis.macd.signal == MACD_BEARISH_CROSS && g_analysis.divergence.macdDivergence == DIV_BEARISH_REGULAR)
+   // Strong bearish: Bearish cross + RSI > 60 (Grok's recommendation)
+   else if(bearishCross && rsiVal > 60)
+   {
+      rec = "STRONG SELL - MACD bearish cross + RSI high (>60)";
+   }
+   // Strong bearish: Bearish cross + Divergence
+   else if(bearishCross && g_analysis.divergence.macdDivergence == DIV_BEARISH_REGULAR)
    {
       rec = "STRONG SELL - MACD bearish cross + Bearish divergence";
    }
-   // Moderate bullish signals
-   else if(g_analysis.macd.signal == MACD_BULLISH_CROSS)
+   // Standard bearish cross
+   else if(bearishCross)
    {
-      rec = "BUY SIGNAL - MACD bullish crossover";
+      rec = "SELL - MACD bearish crossover";
    }
+
+   // === ZERO LINE CROSSOVERS ===
    else if(g_analysis.macd.signal == MACD_ZERO_CROSS_UP)
    {
-      rec = "BULLISH - MACD crossed above zero";
-   }
-   else if(g_analysis.rsi.condition == RSI_OVERSOLD && g_analysis.rsi.rising)
-   {
-      rec = "POTENTIAL BUY - RSI oversold and rising";
-   }
-   // Moderate bearish signals
-   else if(g_analysis.macd.signal == MACD_BEARISH_CROSS)
-   {
-      rec = "SELL SIGNAL - MACD bearish crossover";
+      rec = "BULLISH - MACD crossed above zero line";
    }
    else if(g_analysis.macd.signal == MACD_ZERO_CROSS_DOWN)
    {
-      rec = "BEARISH - MACD crossed below zero";
+      rec = "BEARISH - MACD crossed below zero line";
    }
-   else if(g_analysis.rsi.condition == RSI_OVERBOUGHT && !g_analysis.rsi.rising)
+
+   // === MOMENTUM SIGNALS (Grok's recommendation) ===
+   // Bullish momentum: MACD > 0 && RSI > 50
+   else if(g_analysis.macd.aboveZero && rsiVal > 50)
    {
-      rec = "POTENTIAL SELL - RSI overbought and falling";
+      rec = "BULLISH MOMENTUM - MACD positive + RSI >50";
    }
-   // Warning signals
+   // Bearish momentum: MACD < 0 && RSI < 50
+   else if(!g_analysis.macd.aboveZero && rsiVal < 50)
+   {
+      rec = "BEARISH MOMENTUM - MACD negative + RSI <50";
+   }
+
+   // === EXTREME RSI WARNINGS ===
    else if(g_analysis.rsi.condition == RSI_OVERBOUGHT)
    {
-      rec = "CAUTION - RSI overbought, wait for reversal";
+      rec = "CAUTION - RSI overbought (>" + IntegerToString(InpRSIOverbought) + ")";
    }
    else if(g_analysis.rsi.condition == RSI_OVERSOLD)
    {
-      rec = "CAUTION - RSI oversold, wait for reversal";
+      rec = "CAUTION - RSI oversold (<" + IntegerToString(InpRSIOversold) + ")";
    }
-   // Divergence warnings
+
+   // === DIVERGENCE ALERTS ===
    else if(g_analysis.divergence.macdDivergence == DIV_BULLISH_REGULAR ||
            g_analysis.divergence.rsiDivergence == DIV_BULLISH_REGULAR)
    {
@@ -729,7 +744,8 @@ void GenerateRecommendation()
    {
       rec = "WATCH - Bearish divergence detected";
    }
-   // Momentum
+
+   // === HISTOGRAM MOMENTUM ===
    else if(g_analysis.macd.signal == MACD_BULLISH_MOMENTUM)
    {
       rec = "HOLD LONG - Bullish momentum increasing";
