@@ -49,11 +49,7 @@ input bool     InpPrintReport         = true;     // Print Report to Experts Tab
 //+------------------------------------------------------------------+
 //| Enumerations                                                      |
 //+------------------------------------------------------------------+
-enum ENUM_FVG_TYPE
-{
-   FVG_BULLISH,            // Bullish FVG (demand imbalance)
-   FVG_BEARISH             // Bearish FVG (supply imbalance)
-};
+// Note: ENUM_FVG_TYPE is defined in CommonStructures.mqh
 
 enum ENUM_FVG_STATUS
 {
