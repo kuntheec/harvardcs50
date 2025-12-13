@@ -125,9 +125,13 @@ int OnInit()
    g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
 
    // Calculate pip value
-   if(g_digits == 3 || g_digits == 5)
+   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
+      g_pipValue = 0.10;  // Gold: 1 pip = $0.10
+   else if(StringFind(_Symbol, "XAG") >= 0 || StringFind(_Symbol, "SILVER") >= 0)
+      g_pipValue = 0.01;  // Silver: 1 pip = $0.01
+   else if(g_digits == 3 || g_digits == 5)
       g_pipValue = g_point * 10;
-   else if(g_digits == 2)  // Gold/JPY pairs
+   else if(g_digits == 2)  // JPY pairs
       g_pipValue = g_point;
    else
       g_pipValue = g_point;
@@ -299,12 +303,12 @@ void DetectNewFVGs(int barCount)
 
          if(gapSize >= InpMinFVGSize && gapSize <= InpMaxFVGSize)
          {
-            // Optional: Check for strong move
-            if(InpRequireStrongMove)
+            // Optional: Check for strong move (1x ATR minimum)
+            if(InpRequireStrongMove && ArraySize(g_atrBuffer) > i)
             {
                double atr = g_atrBuffer[i];
                double moveSize = middleHigh - middleLow;
-               if(moveSize < atr * 1.5) continue;  // Not strong enough
+               if(moveSize < atr) continue;  // Not strong enough
             }
 
             // Add bullish FVG
@@ -320,12 +324,12 @@ void DetectNewFVGs(int barCount)
 
          if(gapSize >= InpMinFVGSize && gapSize <= InpMaxFVGSize)
          {
-            // Optional: Check for strong move
-            if(InpRequireStrongMove)
+            // Optional: Check for strong move (1x ATR minimum)
+            if(InpRequireStrongMove && ArraySize(g_atrBuffer) > i)
             {
                double atr = g_atrBuffer[i];
                double moveSize = middleHigh - middleLow;
-               if(moveSize < atr * 1.5) continue;  // Not strong enough
+               if(moveSize < atr) continue;  // Not strong enough
             }
 
             // Add bearish FVG
