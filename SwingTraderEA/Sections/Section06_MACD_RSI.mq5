@@ -131,10 +131,24 @@ void AnalyzeFullMomentum()
       g_result.atrValue = atr;
      }
 
-   // MACD Signal
+   // MACD Signal Detection
    bool bullCross = (macdMain[1] <= macdSig[1] && macd > sig);
    bool bearCross = (macdMain[1] >= macdSig[1] && macd < sig);
-   g_result.macdSignal = bullCross ? MACD_BULLISH_CROSS : (bearCross ? MACD_BEARISH_CROSS : MACD_NO_SIGNAL);
+   bool zeroUp    = (macdMain[1] <= 0 && macd > 0);   // Zero line cross up
+   bool zeroDown  = (macdMain[1] >= 0 && macd < 0);   // Zero line cross down
+
+   double prevHist = macdMain[1] - macdSig[1];
+   bool bullMomentum = (hist > prevHist && hist > 0); // Histogram increasing above zero
+   bool bearMomentum = (hist < prevHist && hist < 0); // Histogram decreasing below zero
+
+   // Priority: Crossover > Zero Cross > Momentum > No Signal
+   if(bullCross)           g_result.macdSignal = MACD_BULLISH_CROSS;
+   else if(bearCross)      g_result.macdSignal = MACD_BEARISH_CROSS;
+   else if(zeroUp)         g_result.macdSignal = MACD_ZERO_CROSS_UP;
+   else if(zeroDown)       g_result.macdSignal = MACD_ZERO_CROSS_DOWN;
+   else if(bullMomentum)   g_result.macdSignal = MACD_BULLISH_MOMENTUM;
+   else if(bearMomentum)   g_result.macdSignal = MACD_BEARISH_MOMENTUM;
+   else                    g_result.macdSignal = MACD_NO_SIGNAL;
 
    // RSI Condition
    if(rsi >= InpRSIOverbought) g_result.rsiCond = RSI_OVERBOUGHT;
@@ -314,4 +328,19 @@ void PrintReport()
    Print("SIGNAL: ",g_result.recommendation);
    Print("==========================");
   }
+
+//==================================================================
+// PUBLIC GETTER FUNCTIONS (for Section 14 integration)
+//==================================================================
+double               GetMACD()           { return g_result.macd; }
+double               GetMACDSignal()     { return g_result.signal; }
+double               GetHistogram()      { return g_result.hist; }
+double               GetRSI()            { return g_result.rsi; }
+double               GetATR()            { return g_result.atrValue; }
+ENUM_MACD_SIGNAL     GetMACDStatus()     { return g_result.macdSignal; }
+ENUM_RSI_CONDITION   GetRSICondition()   { return g_result.rsiCond; }
+ENUM_DIVERGENCE_TYPE GetDivergence()     { return g_result.divergence; }
+ENUM_TREND_BIAS      GetMomentumBias()   { return g_result.bias; }
+int                  GetSignalStrength() { return g_result.strength; }
+string               GetRecommendation() { return g_result.recommendation; }
 //+------------------------------------------------------------------+
