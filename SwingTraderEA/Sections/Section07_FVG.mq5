@@ -27,9 +27,10 @@ input bool     InpTrackMitigation     = true;     // Track FVG Mitigation
 input ENUM_TIMEFRAMES InpFVGTimeframe = PERIOD_H4; // FVG Timeframe
 
 input group "=== FVG Filtering ==="
-input bool     InpRequireStrongMove   = true;     // Require Strong Move (2x ATR)
+input bool     InpRequireStrongMove   = false;    // Require Strong Move (1x ATR) - DISABLED FOR DEBUG
 input int      InpATRPeriod           = 14;       // ATR Period for Filtering
 input bool     InpFilterByTrend       = true;     // Only Show Trend-Aligned FVGs
+input bool     InpDebugMode           = true;     // Debug Mode - Print FVG Detection Details
 
 input group "=== Visual Settings ==="
 input bool     InpDrawFVG             = true;     // Draw FVG Rectangles
@@ -278,6 +279,21 @@ void DetectNewFVGs(int barCount)
    // We check from bar 2 going back, looking for FVGs
    int maxCheck = MathMin(barCount - 3, InpFVGLookback);
 
+   int bullishFound = 0;
+   int bearishFound = 0;
+   int filteredBySize = 0;
+   int filteredByATR = 0;
+
+   if(InpDebugMode)
+   {
+      Print("=== FVG DETECTION DEBUG ===");
+      Print("Checking bars 2 to ", maxCheck);
+      Print("Pip Value: ", DoubleToString(g_pipValue, 4));
+      Print("Min FVG Size: ", InpMinFVGSize, " pips ($", DoubleToString(InpMinFVGSize * g_pipValue, 2), ")");
+      Print("Max FVG Size: ", InpMaxFVGSize, " pips ($", DoubleToString(InpMaxFVGSize * g_pipValue, 2), ")");
+      Print("ATR Filter: ", InpRequireStrongMove ? "ON" : "OFF");
+   }
+
    for(int i = 2; i < maxCheck; i++)
    {
       // Check if this bar already has an FVG recorded
@@ -301,6 +317,12 @@ void DetectNewFVGs(int barCount)
       {
          double gapSize = (rightLow - leftHigh) / g_pipValue;
 
+         if(InpDebugMode && i < 10)  // Only print first 10 for clarity
+         {
+            Print("Bar ", i, " BULLISH GAP found: $", DoubleToString(rightLow - leftHigh, 2),
+                  " = ", DoubleToString(gapSize, 1), " pips");
+         }
+
          if(gapSize >= InpMinFVGSize && gapSize <= InpMaxFVGSize)
          {
             // Optional: Check for strong move (1x ATR minimum)
@@ -308,11 +330,25 @@ void DetectNewFVGs(int barCount)
             {
                double atr = g_atrBuffer[i];
                double moveSize = middleHigh - middleLow;
-               if(moveSize < atr) continue;  // Not strong enough
+               if(moveSize < atr)
+               {
+                  filteredByATR++;
+                  if(InpDebugMode && filteredByATR <= 5)
+                     Print("  -> FILTERED by ATR: move $", DoubleToString(moveSize, 2),
+                           " < ATR $", DoubleToString(atr, 2));
+                  continue;
+               }
             }
 
             // Add bullish FVG
             AddFVGZone(FVG_BULLISH, rightLow, leftHigh, i);
+            bullishFound++;
+            if(InpDebugMode)
+               Print("  -> ADDED Bullish FVG at bar ", i);
+         }
+         else
+         {
+            filteredBySize++;
          }
       }
 
@@ -322,6 +358,12 @@ void DetectNewFVGs(int barCount)
       {
          double gapSize = (leftLow - rightHigh) / g_pipValue;
 
+         if(InpDebugMode && i < 10)
+         {
+            Print("Bar ", i, " BEARISH GAP found: $", DoubleToString(leftLow - rightHigh, 2),
+                  " = ", DoubleToString(gapSize, 1), " pips");
+         }
+
          if(gapSize >= InpMinFVGSize && gapSize <= InpMaxFVGSize)
          {
             // Optional: Check for strong move (1x ATR minimum)
@@ -329,13 +371,37 @@ void DetectNewFVGs(int barCount)
             {
                double atr = g_atrBuffer[i];
                double moveSize = middleHigh - middleLow;
-               if(moveSize < atr) continue;  // Not strong enough
+               if(moveSize < atr)
+               {
+                  filteredByATR++;
+                  if(InpDebugMode && filteredByATR <= 5)
+                     Print("  -> FILTERED by ATR: move $", DoubleToString(moveSize, 2),
+                           " < ATR $", DoubleToString(atr, 2));
+                  continue;
+               }
             }
 
             // Add bearish FVG
             AddFVGZone(FVG_BEARISH, leftLow, rightHigh, i);
+            bearishFound++;
+            if(InpDebugMode)
+               Print("  -> ADDED Bearish FVG at bar ", i);
+         }
+         else
+         {
+            filteredBySize++;
          }
       }
+   }
+
+   if(InpDebugMode)
+   {
+      Print("--- FVG Detection Summary ---");
+      Print("Bullish FVGs Added: ", bullishFound);
+      Print("Bearish FVGs Added: ", bearishFound);
+      Print("Filtered by Size: ", filteredBySize);
+      Print("Filtered by ATR: ", filteredByATR);
+      Print("=============================");
    }
 }
 
