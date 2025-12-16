@@ -5,10 +5,11 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.00"
+#property version   "1.10"
 #property description "Section 1: ATR Volatility Filter"
 #property description "Tests ATR-based market condition classification"
 #property description "H4 timeframe analysis for market volatility"
+#property description "Enhanced: Math functions for S/D zone detection"
 
 //+------------------------------------------------------------------+
 //| Include Files                                                     |
@@ -36,6 +37,11 @@ input int      InpPanelY              = 30;       // Panel Y Position
 input group "=== Report Settings ==="
 input bool     InpPrintReport         = true;     // Print Report to Experts Tab
 input int      InpReportBars          = 20;       // Number of Historical Bars to Report
+
+input group "=== S/D Zone Math Settings ==="
+input double   InpLegOutMultiplier    = 2.0;      // Leg-Out ATR Multiplier (min move >= X * ATR)
+input double   InpBaseMaxMultiplier   = 0.5;      // Base ATR Multiplier (body <= X * ATR)
+input int      InpATRHistoryBars      = 200;      // ATR History Bars to Cache
 
 input group "=== Account Settings (Reference) ==="
 input double   InpStartingBalance     = 500.0;    // Starting Balance ($)
@@ -289,6 +295,18 @@ void PrintInitReport()
    Print("  - ATR < ", InpATRQuietThreshold, " pips: SKIP trade (too quiet)");
    Print("  - ATR ", InpATRQuietThreshold, "-", InpATRExtremeThreshold, " pips: PROCEED (normal)");
    Print("  - ATR > ", InpATRExtremeThreshold, " pips: ADJUST (extreme)");
+   Print("-------------------------------------------------");
+   Print("S/D ZONE MATH SETTINGS (for Section 4):");
+   Print("  Leg-Out Multiplier: ", InpLegOutMultiplier, "x ATR (move >= ", InpLegOutMultiplier, " x ATR)");
+   Print("  Base Max Multiplier: ", InpBaseMaxMultiplier, "x ATR (body <= ", InpBaseMaxMultiplier, " x ATR)");
+   Print("  ATR History Bars: ", InpATRHistoryBars);
+   Print("-------------------------------------------------");
+   Print("NEW PUBLIC FUNCTIONS:");
+   Print("  GetATRPriceAtBar(bar) - ATR in price units");
+   Print("  GetATRPipsAtBar(bar)  - ATR in pips");
+   Print("  IsValidLegOut(move, bar) - Check leg-out >= 2x ATR");
+   Print("  IsValidBase(body, bar)   - Check base <= 0.5x ATR");
+   Print("  CalculateZoneScore()     - Zone quality score (0-13)");
    Print("=================================================");
    Print("");
 }
@@ -505,5 +523,154 @@ double GetCurrentATRPips()
 ENUM_MARKET_CONDITION GetMarketCondition()
 {
    return g_currentResult.condition;
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Get ATR in PRICE UNITS at specific bar index                 |
+//| Returns raw ATR value (not converted to pips)                     |
+//| Used for direct comparison with candle body sizes                 |
+//+------------------------------------------------------------------+
+double GetATRPriceAtBar(int barIndex = 0)
+{
+   // Ensure we have data
+   if(ArraySize(g_atrBuffer) <= barIndex || barIndex < 0)
+   {
+      // Try to copy more data
+      int copied = CopyBuffer(g_atrHandle, 0, 0, barIndex + 10, g_atrBuffer);
+      if(copied <= barIndex)
+      {
+         Print("WARNING: GetATRPriceAtBar - Cannot get ATR at bar ", barIndex);
+         return 0.0;
+      }
+   }
+
+   // Return raw ATR in price units
+   return g_atrBuffer[barIndex];
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Get ATR in PIPS at specific bar index                        |
+//| Converts ATR to pips for display purposes                         |
+//+------------------------------------------------------------------+
+double GetATRPipsAtBar(int barIndex = 0)
+{
+   double atrPrice = GetATRPriceAtBar(barIndex);
+   if(atrPrice == 0.0) return 0.0;
+
+   // Convert to pips
+   // Gold: ATR is in dollars, 1 pip = $0.10, so multiply by 10
+   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
+      return atrPrice * 10.0;
+   else
+      return PointsToPips(_Symbol, atrPrice);
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Validate Leg-Out Move (for S/D Zone Detection)               |
+//| Rule: Leg-Out distance must be >= LegOutMultiplier × ATR          |
+//| Returns true if move is strong enough to create valid zone        |
+//+------------------------------------------------------------------+
+bool IsValidLegOut(double moveDistance, int barIndex = 0)
+{
+   double atr = GetATRPriceAtBar(barIndex);
+   if(atr == 0.0) return false;
+
+   double requiredMove = InpLegOutMultiplier * atr;
+   return (moveDistance >= requiredMove);
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Validate Base Candle (for S/D Zone Detection)                |
+//| Rule: Base candle body must be <= BaseMaxMultiplier × ATR         |
+//| Returns true if candle is small enough for valid base             |
+//+------------------------------------------------------------------+
+bool IsValidBase(double bodySize, int barIndex = 0)
+{
+   double atr = GetATRPriceAtBar(barIndex);
+   if(atr == 0.0) return false;
+
+   double maxBodySize = InpBaseMaxMultiplier * atr;
+   return (bodySize <= maxBodySize);
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Calculate Zone Score (for S/D Zone Quality)                  |
+//| Mathematical scoring system for zone quality                       |
+//| Returns score 0-10 (trade zones with score >= 7)                  |
+//+------------------------------------------------------------------+
+int CalculateZoneScore(double legOutDistance, double baseBodyMax,
+                       bool isFresh, bool alignsWithFib,
+                       bool causedBOS, int barIndex = 0)
+{
+   int score = 0;
+   double atr = GetATRPriceAtBar(barIndex);
+   if(atr == 0.0) return 0;
+
+   // Leg-Out Score: Is move >= 2× ATR? (+3 points)
+   if(legOutDistance >= InpLegOutMultiplier * atr)
+      score += 3;
+   else if(legOutDistance >= 1.5 * atr)  // Partial credit for 1.5× ATR
+      score += 1;
+
+   // Base Score: Are base candles <= 0.5× ATR? (+2 points)
+   if(baseBodyMax <= InpBaseMaxMultiplier * atr)
+      score += 2;
+   else if(baseBodyMax <= 0.75 * atr)  // Partial credit
+      score += 1;
+
+   // Freshness Score: Never tested? (+5 points if fresh, +2 if tested once)
+   if(isFresh)
+      score += 5;
+   else
+      score += 2;  // Tested once still has some value
+
+   // Fibonacci Alignment (+1 point)
+   if(alignsWithFib)
+      score += 1;
+
+   // BOS/CHoCH Correlation (+2 points) - from Section 3
+   if(causedBOS)
+      score += 2;
+
+   return score;  // Max possible: 13 points
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Get Leg-Out Threshold (for display/debug)                    |
+//+------------------------------------------------------------------+
+double GetLegOutThreshold(int barIndex = 0)
+{
+   return InpLegOutMultiplier * GetATRPriceAtBar(barIndex);
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Get Base Max Threshold (for display/debug)                   |
+//+------------------------------------------------------------------+
+double GetBaseMaxThreshold(int barIndex = 0)
+{
+   return InpBaseMaxMultiplier * GetATRPriceAtBar(barIndex);
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Get ATR Multiplier Settings                                  |
+//+------------------------------------------------------------------+
+double GetLegOutMultiplier() { return InpLegOutMultiplier; }
+double GetBaseMaxMultiplier() { return InpBaseMaxMultiplier; }
+
+//+------------------------------------------------------------------+
+//| NEW: Refresh ATR Buffer (load history)                            |
+//| Call this to ensure ATR history is loaded for zone detection      |
+//+------------------------------------------------------------------+
+bool RefreshATRBuffer(int barsNeeded = 0)
+{
+   if(barsNeeded <= 0) barsNeeded = InpATRHistoryBars;
+
+   int copied = CopyBuffer(g_atrHandle, 0, 0, barsNeeded, g_atrBuffer);
+   if(copied < barsNeeded)
+   {
+      Print("WARNING: RefreshATRBuffer - Only copied ", copied, " of ", barsNeeded, " bars");
+      return false;
+   }
+   return true;
 }
 //+------------------------------------------------------------------+
