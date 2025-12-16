@@ -5,10 +5,10 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.00"
+#property version   "1.10"
 #property description "Section 4: Supply/Demand Zone Detection"
 #property description "Identifies institutional order blocks"
-#property description "Marks zones where price may reverse"
+#property description "Auto-adapts settings for Gold/JPY/Forex pairs"
 
 //+------------------------------------------------------------------+
 //| Include Files                                                     |
@@ -20,9 +20,9 @@
 //+------------------------------------------------------------------+
 input group "=== Zone Detection Settings ==="
 input int      InpZoneLookback        = 100;      // Zone Detection Lookback (candles)
-input int      InpMinMoveCandles      = 3;        // Min Candles for Strong Move
-input double   InpMinMovePercent      = 0.3;      // Min Move Size (% of price)
-input double   InpZoneExtendPercent   = 10.0;     // Zone Extension (%)
+input int      InpMinMoveCandles      = 4;        // Min Candles for Strong Move
+input double   InpMinMovePercent      = 0.5;      // Min Move Size (% of price)
+input double   InpZoneExtendPercent   = 5.0;      // Zone Extension (%)
 input int      InpMaxZones            = 10;       // Max Zones to Track
 input ENUM_TIMEFRAMES InpZoneTimeframe = PERIOD_H4; // Zone Analysis Timeframe
 
@@ -41,6 +41,10 @@ input bool     InpUseATRFilter        = true;     // Use ATR Volatility Filter
 input int      InpATRPeriod           = 14;       // ATR Period
 input double   InpATRQuietThreshold   = 60.0;     // Quiet Market Threshold (pips)
 input double   InpATRExtremeThreshold = 250.0;    // Extreme Volatility Threshold (pips)
+
+input group "=== Alert Settings ==="
+input bool     InpAlertOnZoneEntry    = true;     // Alert When Price Enters Zone
+input bool     InpPushNotification    = false;    // Send Push Notifications
 
 input group "=== Display Settings ==="
 input bool     InpShowPanel           = true;     // Show Info Panel
@@ -89,6 +93,17 @@ string         g_panelName = "SDZonePanel";
 // Symbol info
 int            g_digits;
 double         g_point;
+double         g_pipSize;
+
+// Auto-adaptive settings (based on instrument type)
+double         g_minMovePercent;
+int            g_minMoveCandles;
+double         g_zoneExtendPercent;
+string         g_instrumentType;
+
+// Alert tracking
+bool           g_wasInDemandZone = false;
+bool           g_wasInSupplyZone = false;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -98,6 +113,57 @@ int OnInit()
    // Get symbol info
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   // Auto-detect instrument type and set adaptive parameters
+   string sym = _Symbol;
+   StringToUpper(sym);
+
+   if(StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0)
+   {
+      g_instrumentType = "GOLD";
+      g_minMovePercent = 0.5;        // Gold needs bigger moves
+      g_minMoveCandles = 4;          // More candles for confirmation
+      g_zoneExtendPercent = 5.0;     // Tighter zone extension
+      g_pipSize = 0.10;              // Gold: 1 pip = $0.10
+      Print("AUTO-DETECT: Gold pair - using stronger zone settings");
+   }
+   else if(StringFind(sym, "XAG") >= 0 || StringFind(sym, "SILVER") >= 0)
+   {
+      g_instrumentType = "SILVER";
+      g_minMovePercent = 0.4;
+      g_minMoveCandles = 4;
+      g_zoneExtendPercent = 6.0;
+      g_pipSize = 0.01;              // Silver: 1 pip = $0.01
+      Print("AUTO-DETECT: Silver pair - using precious metal settings");
+   }
+   else if(StringFind(sym, "JPY") >= 0)
+   {
+      g_instrumentType = "JPY";
+      g_minMovePercent = 0.3;        // JPY pairs move less %
+      g_minMoveCandles = 3;
+      g_zoneExtendPercent = 10.0;    // Wider extension for JPY
+      g_pipSize = g_point * (g_digits == 3 ? 1 : 10);
+      Print("AUTO-DETECT: JPY pair - using JPY-optimized settings");
+   }
+   else
+   {
+      g_instrumentType = "FOREX";
+      g_minMovePercent = 0.4;        // Standard forex
+      g_minMoveCandles = 3;
+      g_zoneExtendPercent = 8.0;
+      g_pipSize = g_point * (g_digits == 5 ? 10 : 1);
+      Print("AUTO-DETECT: Standard forex pair - using balanced settings");
+   }
+
+   // Allow user override if they set non-default values
+   if(InpMinMovePercent != 0.5 || InpMinMoveCandles != 4 || InpZoneExtendPercent != 5.0)
+   {
+      // User has customized settings, use their values
+      g_minMovePercent = InpMinMovePercent;
+      g_minMoveCandles = InpMinMoveCandles;
+      g_zoneExtendPercent = InpZoneExtendPercent;
+      Print("USER OVERRIDE: Using custom settings from inputs");
+   }
 
    // Initialize arrays
    ArrayResize(g_demandZones, InpMaxZones);
@@ -175,6 +241,10 @@ void OnTick()
    static datetime lastBarTime = 0;
    datetime currentBarTime = iTime(_Symbol, InpZoneTimeframe, 0);
 
+   // Check for zone entry alerts on every tick
+   if(InpAlertOnZoneEntry)
+      CheckZoneEntryAlerts();
+
    if(currentBarTime != lastBarTime)
    {
       lastBarTime = currentBarTime;
@@ -185,12 +255,72 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
+//| Check for zone entry and trigger alerts                           |
+//+------------------------------------------------------------------+
+void CheckZoneEntryAlerts()
+{
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   bool inDemandZone = false;
+   bool inSupplyZone = false;
+
+   // Check demand zones
+   for(int i = 0; i < g_demandCount; i++)
+   {
+      if(g_demandZones[i].status != ZONE_BROKEN &&
+         currentPrice <= g_demandZones[i].upperPrice &&
+         currentPrice >= g_demandZones[i].lowerPrice)
+      {
+         inDemandZone = true;
+         break;
+      }
+   }
+
+   // Check supply zones
+   for(int i = 0; i < g_supplyCount; i++)
+   {
+      if(g_supplyZones[i].status != ZONE_BROKEN &&
+         currentPrice >= g_supplyZones[i].lowerPrice &&
+         currentPrice <= g_supplyZones[i].upperPrice)
+      {
+         inSupplyZone = true;
+         break;
+      }
+   }
+
+   // Alert on demand zone entry (was not in, now is in)
+   if(inDemandZone && !g_wasInDemandZone)
+   {
+      string alertMsg = _Symbol + " entered DEMAND zone at " + DoubleToString(currentPrice, g_digits);
+      Alert(alertMsg);
+      Print("ALERT: ", alertMsg);
+
+      if(InpPushNotification)
+         SendNotification(alertMsg);
+   }
+
+   // Alert on supply zone entry (was not in, now is in)
+   if(inSupplyZone && !g_wasInSupplyZone)
+   {
+      string alertMsg = _Symbol + " entered SUPPLY zone at " + DoubleToString(currentPrice, g_digits);
+      Alert(alertMsg);
+      Print("ALERT: ", alertMsg);
+
+      if(InpPushNotification)
+         SendNotification(alertMsg);
+   }
+
+   // Update tracking
+   g_wasInDemandZone = inDemandZone;
+   g_wasInSupplyZone = inSupplyZone;
+}
+
+//+------------------------------------------------------------------+
 //| Main Zone Analysis Function                                       |
 //+------------------------------------------------------------------+
 void AnalyzeZones()
 {
    // Copy price data
-   int barsNeeded = InpZoneLookback + InpMinMoveCandles + 5;
+   int barsNeeded = InpZoneLookback + g_minMoveCandles + 5;
 
    if(CopyHigh(_Symbol, InpZoneTimeframe, 0, barsNeeded, g_highBuffer) < barsNeeded) return;
    if(CopyLow(_Symbol, InpZoneTimeframe, 0, barsNeeded, g_lowBuffer) < barsNeeded) return;
@@ -232,8 +362,11 @@ void AnalyzeATR()
    double atrPoints = g_atrBuffer[0];
    double atrPips;
 
-   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
+   // Convert ATR to pips based on instrument type
+   if(g_instrumentType == "GOLD")
       atrPips = atrPoints * 10;
+   else if(g_instrumentType == "SILVER")
+      atrPips = atrPoints * 100;
    else
       atrPips = PointsToPips(_Symbol, atrPoints);
 
@@ -285,7 +418,7 @@ void DetectDemandZones()
    g_demandCount = 0;
 
    // Look for last bearish candle before strong bullish move
-   for(int i = InpMinMoveCandles + 1; i < InpZoneLookback - 1; i++)
+   for(int i = g_minMoveCandles + 1; i < InpZoneLookback - 1; i++)
    {
       if(g_demandCount >= InpMaxZones) break;
 
@@ -293,7 +426,7 @@ void DetectDemandZones()
       if(!IsBearishCandle(i)) continue;
 
       // Check if there's a strong bullish move after this candle
-      if(IsStrongBullishMove(i - 1, InpMinMoveCandles))
+      if(IsStrongBullishMove(i - 1, g_minMoveCandles))
       {
          // This bearish candle is the origin of a demand zone
          SDZone zone;
@@ -306,12 +439,12 @@ void DetectDemandZones()
          zone.touchCount = 0;
 
          // Calculate zone strength based on move size
-         double moveSize = CalculateMoveSize(i - 1, InpMinMoveCandles, true);
+         double moveSize = CalculateMoveSize(i - 1, g_minMoveCandles, true);
          zone.strength = moveSize;
 
-         // Extend zone slightly
+         // Extend zone slightly using adaptive setting
          double zoneHeight = zone.upperPrice - zone.lowerPrice;
-         zone.lowerPrice -= zoneHeight * (InpZoneExtendPercent / 100.0);
+         zone.lowerPrice -= zoneHeight * (g_zoneExtendPercent / 100.0);
 
          // Check if zone should be filtered by EMA
          if(InpFilterByEMA && InpUseEMAFilter)
@@ -335,7 +468,7 @@ void DetectSupplyZones()
    g_supplyCount = 0;
 
    // Look for last bullish candle before strong bearish move
-   for(int i = InpMinMoveCandles + 1; i < InpZoneLookback - 1; i++)
+   for(int i = g_minMoveCandles + 1; i < InpZoneLookback - 1; i++)
    {
       if(g_supplyCount >= InpMaxZones) break;
 
@@ -343,7 +476,7 @@ void DetectSupplyZones()
       if(!IsBullishCandle(i)) continue;
 
       // Check if there's a strong bearish move after this candle
-      if(IsStrongBearishMove(i - 1, InpMinMoveCandles))
+      if(IsStrongBearishMove(i - 1, g_minMoveCandles))
       {
          // This bullish candle is the origin of a supply zone
          SDZone zone;
@@ -356,12 +489,12 @@ void DetectSupplyZones()
          zone.touchCount = 0;
 
          // Calculate zone strength based on move size
-         double moveSize = CalculateMoveSize(i - 1, InpMinMoveCandles, false);
+         double moveSize = CalculateMoveSize(i - 1, g_minMoveCandles, false);
          zone.strength = moveSize;
 
-         // Extend zone slightly
+         // Extend zone slightly using adaptive setting
          double zoneHeight = zone.upperPrice - zone.lowerPrice;
-         zone.upperPrice += zoneHeight * (InpZoneExtendPercent / 100.0);
+         zone.upperPrice += zoneHeight * (g_zoneExtendPercent / 100.0);
 
          // Check if zone should be filtered by EMA
          if(InpFilterByEMA && InpUseEMAFilter)
@@ -422,7 +555,8 @@ bool IsStrongBullishMove(int startIndex, int numCandles)
    double movePercent = (totalMove / startPrice) * 100;
 
    // Strong move = majority bullish candles AND significant price move
-   return (bullishCount >= (numCandles * 2 / 3)) && (movePercent >= InpMinMovePercent);
+   // Uses adaptive g_minMovePercent based on instrument type
+   return (bullishCount >= (numCandles * 2 / 3)) && (movePercent >= g_minMovePercent);
 }
 
 //+------------------------------------------------------------------+
@@ -454,7 +588,8 @@ bool IsStrongBearishMove(int startIndex, int numCandles)
    double movePercent = (totalMove / startPrice) * 100;
 
    // Strong move = majority bearish candles AND significant price move
-   return (bearishCount >= (numCandles * 2 / 3)) && (movePercent >= InpMinMovePercent);
+   // Uses adaptive g_minMovePercent based on instrument type
+   return (bearishCount >= (numCandles * 2 / 3)) && (movePercent >= g_minMovePercent);
 }
 
 //+------------------------------------------------------------------+
@@ -695,10 +830,17 @@ void PrintZoneReport()
    Print("=================================================");
    Print("    SUPPLY/DEMAND ZONE REPORT (Section 4)        ");
    Print("=================================================");
-   Print("Symbol: ", _Symbol);
+   Print("Symbol: ", _Symbol, " (", g_instrumentType, ")");
    Print("Timeframe: ", TimeframeToString(InpZoneTimeframe));
    Print("Analysis Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
    Print("Current Price: ", DoubleToString(currentPrice, g_digits));
+   Print("-------------------------------------------------");
+
+   // Active Settings
+   Print("ACTIVE SETTINGS (auto-adaptive):");
+   Print("  Min Move %: ", DoubleToString(g_minMovePercent, 2), "%");
+   Print("  Min Move Candles: ", g_minMoveCandles);
+   Print("  Zone Extension: ", DoubleToString(g_zoneExtendPercent, 1), "%");
    Print("-------------------------------------------------");
 
    // ATR Status
@@ -873,15 +1015,23 @@ void PrintInitReport()
    Print("=================================================");
    Print("Initialization Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
    Print("-------------------------------------------------");
-   Print("SYMBOL: ", _Symbol);
+   Print("SYMBOL: ", _Symbol, " (", g_instrumentType, ")");
    Print("TIMEFRAME: ", TimeframeToString(InpZoneTimeframe));
+   Print("-------------------------------------------------");
+   Print("AUTO-ADAPTIVE SETTINGS:");
+   Print("  Instrument Type: ", g_instrumentType);
+   Print("  Min Move %: ", DoubleToString(g_minMovePercent, 2), "%");
+   Print("  Min Move Candles: ", g_minMoveCandles);
+   Print("  Zone Extension: ", DoubleToString(g_zoneExtendPercent, 1), "%");
+   Print("  Pip Size: ", DoubleToString(g_pipSize, 4));
    Print("-------------------------------------------------");
    Print("ZONE DETECTION SETTINGS:");
    Print("  Lookback: ", InpZoneLookback, " candles");
-   Print("  Min Move Candles: ", InpMinMoveCandles);
-   Print("  Min Move Size: ", DoubleToString(InpMinMovePercent, 2), "%");
-   Print("  Zone Extension: ", DoubleToString(InpZoneExtendPercent, 1), "%");
    Print("  Max Zones: ", InpMaxZones);
+   Print("-------------------------------------------------");
+   Print("ALERT SETTINGS:");
+   Print("  Zone Entry Alerts: ", InpAlertOnZoneEntry ? "ON" : "OFF");
+   Print("  Push Notifications: ", InpPushNotification ? "ON" : "OFF");
    Print("-------------------------------------------------");
    Print("ZONE RULES:");
    Print("  DEMAND: Last bearish candle before strong up move");
@@ -901,7 +1051,7 @@ void CreatePanel()
    int x = InpPanelX;
    int y = InpPanelY;
 
-   CreateRectangle(g_panelName + "_bg", x, y, 320, 260, clrBlack, 200);
+   CreateRectangle(g_panelName + "_bg", x, y, 320, 280, clrBlack, 200);
 
    CreateLabel(g_panelName + "_title", x + 10, y + 5,
                "SUPPLY/DEMAND ZONES", clrGold, 10, "Arial Bold");
@@ -910,6 +1060,11 @@ void CreatePanel()
                "------------------------------------", clrGray, 8, "Courier New");
 
    int yOff = 40;
+
+   // Instrument Type
+   CreateLabel(g_panelName + "_inst_label", x + 10, y + yOff, "Instrument:", clrWhite, 9, "Arial");
+   CreateLabel(g_panelName + "_inst_value", x + 120, y + yOff, g_instrumentType, clrCyan, 9, "Arial Bold");
+   yOff += 20;
 
    // ATR Status
    if(InpUseATRFilter)
@@ -1170,4 +1325,7 @@ int GetDemandZoneCount() { return g_demandCount; }
 int GetSupplyZoneCount() { return g_supplyCount; }
 SDZone GetDemandZone(int index) { return (index < g_demandCount) ? g_demandZones[index] : g_demandZones[0]; }
 SDZone GetSupplyZone(int index) { return (index < g_supplyCount) ? g_supplyZones[index] : g_supplyZones[0]; }
+bool IsPriceInDemandZone() { return g_wasInDemandZone; }
+bool IsPriceInSupplyZone() { return g_wasInSupplyZone; }
+string GetInstrumentType() { return g_instrumentType; }
 //+------------------------------------------------------------------+
