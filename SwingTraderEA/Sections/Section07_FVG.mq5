@@ -5,10 +5,11 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.00"
+#property version   "1.20"
 #property description "Section 7: Fair Value Gap Detection"
 #property description "Identifies price imbalances from rapid moves"
 #property description "Smart Money Concept for entry timing"
+#property description "Merged: Claude core + Grok alerts/age/auto-adjust"
 
 //+------------------------------------------------------------------+
 //| Include Files                                                     |
@@ -21,16 +22,21 @@
 input group "=== FVG Detection Settings ==="
 input int      InpFVGLookback         = 100;      // Lookback Bars for FVG Detection
 input double   InpMinFVGSize          = 5.0;      // Minimum FVG Size (pips)
-input double   InpMaxFVGSize          = 500.0;    // Maximum FVG Size (pips)
+input double   InpMaxFVGSize          = 500.0;    // Maximum FVG Size (pips) - Auto-adjusted by symbol
 input int      InpMaxFVGCount         = 10;       // Maximum FVGs to Track
 input bool     InpTrackMitigation     = true;     // Track FVG Mitigation
 input ENUM_TIMEFRAMES InpFVGTimeframe = PERIOD_H4; // FVG Timeframe
 
 input group "=== FVG Filtering ==="
-input bool     InpRequireStrongMove   = false;    // Require Strong Move (1x ATR) - DISABLED FOR DEBUG
+input bool     InpRequireStrongMove   = false;    // Require Strong Move (1x ATR)
 input int      InpATRPeriod           = 14;       // ATR Period for Filtering
 input bool     InpFilterByTrend       = true;     // Only Show Trend-Aligned FVGs
-input bool     InpDebugMode           = true;     // Debug Mode - Print FVG Detection Details
+input bool     InpDebugMode           = false;    // Debug Mode - Print FVG Detection Details
+
+input group "=== Alert Settings ==="
+input bool     InpAlertOnNewFVG       = true;     // Alert on New FVG Formation
+input bool     InpAlertOnPriceEnter   = true;     // Alert When Price Enters FVG
+input bool     InpPushNotification    = false;    // Send Push Notifications
 
 input group "=== Visual Settings ==="
 input bool     InpDrawFVG             = true;     // Draw FVG Rectangles
@@ -73,8 +79,10 @@ struct FVGZone
    datetime         timeCreated;    // When FVG was created
    datetime         timeMitigated;  // When FVG was filled (if applicable)
    int              barIndex;       // Bar index when created
+   int              ageBars;        // Age in bars (from Grok)
    string           objName;        // Chart object name
    bool             isValid;        // Is this zone still valid/tracked
+   bool             alertedEntry;   // Already alerted for price entry
 };
 
 struct FVGAnalysis
@@ -115,6 +123,10 @@ string            g_panelName = "FVGPanel";
 int               g_digits;
 double            g_point;
 double            g_pipValue;
+string            g_instrumentType;
+
+// Auto-adjusted max FVG size (from Grok)
+double            g_maxFVGSize;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -125,17 +137,50 @@ int OnInit()
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
 
-   // Calculate pip value
-   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
-      g_pipValue = 0.10;  // Gold: 1 pip = $0.10
-   else if(StringFind(_Symbol, "XAG") >= 0 || StringFind(_Symbol, "SILVER") >= 0)
-      g_pipValue = 0.01;  // Silver: 1 pip = $0.01
-   else if(g_digits == 3 || g_digits == 5)
-      g_pipValue = g_point * 10;
-   else if(g_digits == 2)  // JPY pairs
-      g_pipValue = g_point;
+   // Auto-detect instrument and set pip value + max FVG size
+   string sym = _Symbol;
+   StringToUpper(sym);
+
+   if(StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0)
+   {
+      g_instrumentType = "GOLD";
+      g_pipValue = 0.10;           // Gold: 1 pip = $0.10
+      g_maxFVGSize = 2000.0;       // Gold has larger gaps
+      Print("AUTO-DETECT: Gold - pipValue=0.10, maxFVG=2000 pips");
+   }
+   else if(StringFind(sym, "XAG") >= 0 || StringFind(sym, "SILVER") >= 0)
+   {
+      g_instrumentType = "SILVER";
+      g_pipValue = 0.01;           // Silver: 1 pip = $0.01
+      g_maxFVGSize = 500.0;
+      Print("AUTO-DETECT: Silver - pipValue=0.01, maxFVG=500 pips");
+   }
+   else if(StringFind(sym, "JPY") >= 0)
+   {
+      g_instrumentType = "JPY";
+      g_pipValue = g_point * (g_digits == 3 ? 1 : 10);
+      g_maxFVGSize = 300.0;        // JPY pairs have smaller gaps
+      Print("AUTO-DETECT: JPY pair - maxFVG=300 pips");
+   }
    else
-      g_pipValue = g_point;
+   {
+      g_instrumentType = "FOREX";
+      if(g_digits == 3 || g_digits == 5)
+         g_pipValue = g_point * 10;
+      else if(g_digits == 2)
+         g_pipValue = g_point;
+      else
+         g_pipValue = g_point;
+      g_maxFVGSize = 1000.0;       // Standard forex
+      Print("AUTO-DETECT: Forex pair - maxFVG=1000 pips");
+   }
+
+   // Allow user override if they set a specific value
+   if(InpMaxFVGSize != 500.0)
+   {
+      g_maxFVGSize = InpMaxFVGSize;
+      Print("USER OVERRIDE: maxFVGSize=", g_maxFVGSize);
+   }
 
    // Initialize arrays as series
    ArraySetAsSeries(g_highBuffer, true);
@@ -217,6 +262,18 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
+//| Send Alert (from Grok)                                            |
+//+------------------------------------------------------------------+
+void SendFVGAlert(string message)
+{
+   Alert(message);
+   Print("ALERT: ", message);
+
+   if(InpPushNotification)
+      SendNotification(message);
+}
+
+//+------------------------------------------------------------------+
 //| Main FVG Analysis Function                                        |
 //+------------------------------------------------------------------+
 void AnalyzeFVG()
@@ -253,6 +310,9 @@ void AnalyzeFVG()
    if(InpTrackMitigation)
       CheckFVGMitigation();
 
+   // Update zone ages (from Grok)
+   UpdateZoneAges();
+
    // Update visual objects
    if(InpDrawFVG)
       UpdateFVGDrawings();
@@ -268,6 +328,20 @@ void AnalyzeFVG()
    // Print report
    if(InpPrintReport)
       PrintFVGReport();
+}
+
+//+------------------------------------------------------------------+
+//| Update Zone Ages (from Grok)                                      |
+//+------------------------------------------------------------------+
+void UpdateZoneAges()
+{
+   int totalBars = Bars(_Symbol, InpFVGTimeframe);
+   int count = ArraySize(g_analysis.zones);
+
+   for(int i = 0; i < count; i++)
+   {
+      g_analysis.zones[i].ageBars = totalBars - g_analysis.zones[i].barIndex - 1;
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -287,10 +361,11 @@ void DetectNewFVGs(int barCount)
    if(InpDebugMode)
    {
       Print("=== FVG DETECTION DEBUG ===");
+      Print("Instrument: ", g_instrumentType);
       Print("Checking bars 2 to ", maxCheck);
       Print("Pip Value: ", DoubleToString(g_pipValue, 4));
       Print("Min FVG Size: ", InpMinFVGSize, " pips ($", DoubleToString(InpMinFVGSize * g_pipValue, 2), ")");
-      Print("Max FVG Size: ", InpMaxFVGSize, " pips ($", DoubleToString(InpMaxFVGSize * g_pipValue, 2), ")");
+      Print("Max FVG Size: ", g_maxFVGSize, " pips ($", DoubleToString(g_maxFVGSize * g_pipValue, 2), ")");
       Print("ATR Filter: ", InpRequireStrongMove ? "ON" : "OFF");
    }
 
@@ -323,7 +398,7 @@ void DetectNewFVGs(int barCount)
                   " = ", DoubleToString(gapSize, 1), " pips");
          }
 
-         if(gapSize >= InpMinFVGSize && gapSize <= InpMaxFVGSize)
+         if(gapSize >= InpMinFVGSize && gapSize <= g_maxFVGSize)
          {
             // Optional: Check for strong move (1x ATR minimum)
             if(InpRequireStrongMove && ArraySize(g_atrBuffer) > i)
@@ -343,8 +418,16 @@ void DetectNewFVGs(int barCount)
             // Add bullish FVG
             AddFVGZone(FVG_BULLISH, rightLow, leftHigh, i);
             bullishFound++;
+
             if(InpDebugMode)
                Print("  -> ADDED Bullish FVG at bar ", i);
+
+            // Alert on new FVG (from Grok)
+            if(InpAlertOnNewFVG && i <= 5)  // Only alert for recent FVGs
+            {
+               SendFVGAlert(_Symbol + " New BULLISH FVG at " + DoubleToString(rightLow, g_digits) +
+                           " (" + DoubleToString(gapSize, 1) + " pips)");
+            }
          }
          else
          {
@@ -364,7 +447,7 @@ void DetectNewFVGs(int barCount)
                   " = ", DoubleToString(gapSize, 1), " pips");
          }
 
-         if(gapSize >= InpMinFVGSize && gapSize <= InpMaxFVGSize)
+         if(gapSize >= InpMinFVGSize && gapSize <= g_maxFVGSize)
          {
             // Optional: Check for strong move (1x ATR minimum)
             if(InpRequireStrongMove && ArraySize(g_atrBuffer) > i)
@@ -384,8 +467,16 @@ void DetectNewFVGs(int barCount)
             // Add bearish FVG
             AddFVGZone(FVG_BEARISH, leftLow, rightHigh, i);
             bearishFound++;
+
             if(InpDebugMode)
                Print("  -> ADDED Bearish FVG at bar ", i);
+
+            // Alert on new FVG (from Grok)
+            if(InpAlertOnNewFVG && i <= 5)  // Only alert for recent FVGs
+            {
+               SendFVGAlert(_Symbol + " New BEARISH FVG at " + DoubleToString(leftLow, g_digits) +
+                           " (" + DoubleToString(gapSize, 1) + " pips)");
+            }
          }
          else
          {
@@ -449,15 +540,17 @@ void AddFVGZone(ENUM_FVG_TYPE type, double high, double low, int barIndex)
    FVGZone zone;
    zone.type = type;
    zone.status = FVG_FRESH;
-   zone.highPrice = high;
-   zone.lowPrice = low;
-   zone.midPrice = (high + low) / 2.0;
-   zone.sizePips = (high - low) / g_pipValue;
+   zone.highPrice = MathMax(high, low);
+   zone.lowPrice = MathMin(high, low);
+   zone.midPrice = (zone.highPrice + zone.lowPrice) / 2.0;
+   zone.sizePips = (zone.highPrice - zone.lowPrice) / g_pipValue;
    zone.timeCreated = iTime(_Symbol, InpFVGTimeframe, barIndex);
    zone.timeMitigated = 0;
    zone.barIndex = barIndex;
+   zone.ageBars = Bars(_Symbol, InpFVGTimeframe) - barIndex - 1;
    zone.objName = "FVG_" + IntegerToString(zone.timeCreated);
    zone.isValid = true;
+   zone.alertedEntry = false;
 
    g_analysis.zones[count] = zone;
 }
@@ -546,7 +639,18 @@ void CheckFVGMitigation()
          currentPrice <= g_analysis.zones[i].highPrice)
       {
          if(g_analysis.zones[i].status == FVG_FRESH)
+         {
             g_analysis.zones[i].status = FVG_PARTIALLY_FILLED;
+
+            // Alert on price entry (from Grok)
+            if(InpAlertOnPriceEnter && !g_analysis.zones[i].alertedEntry)
+            {
+               string typeStr = (g_analysis.zones[i].type == FVG_BULLISH) ? "BULLISH" : "BEARISH";
+               SendFVGAlert(_Symbol + " Price entered " + typeStr + " FVG at " +
+                           DoubleToString(currentPrice, g_digits));
+               g_analysis.zones[i].alertedEntry = true;
+            }
+         }
       }
 
       // Check for full mitigation
@@ -557,7 +661,7 @@ void CheckFVGMitigation()
          // Check if any recent candle closed below FVG low
          for(int j = 0; j < 5; j++)
          {
-            if(g_closeBuffer[j] < g_analysis.zones[i].lowPrice)
+            if(ArraySize(g_closeBuffer) > j && g_closeBuffer[j] < g_analysis.zones[i].lowPrice)
             {
                g_analysis.zones[i].status = FVG_FULLY_MITIGATED;
                g_analysis.zones[i].timeMitigated = TimeCurrent();
@@ -570,7 +674,7 @@ void CheckFVGMitigation()
          // Check if any recent candle closed above FVG high
          for(int j = 0; j < 5; j++)
          {
-            if(g_closeBuffer[j] > g_analysis.zones[i].highPrice)
+            if(ArraySize(g_closeBuffer) > j && g_closeBuffer[j] > g_analysis.zones[i].highPrice)
             {
                g_analysis.zones[i].status = FVG_FULLY_MITIGATED;
                g_analysis.zones[i].timeMitigated = TimeCurrent();
@@ -723,6 +827,7 @@ void GenerateRecommendation()
 void UpdateFVGDrawings()
 {
    int count = ArraySize(g_analysis.zones);
+   datetime farRight = TimeCurrent() + PeriodSeconds(InpFVGTimeframe) * 50;
 
    for(int i = 0; i < count; i++)
    {
@@ -738,13 +843,11 @@ void UpdateFVGDrawings()
          zoneColor = InpBearishFVGColor;
 
       // Create or update rectangle
-      datetime endTime = TimeCurrent() + PeriodSeconds(InpFVGTimeframe) * 20;
-
       if(ObjectFind(0, zone.objName) < 0)
       {
          ObjectCreate(0, zone.objName, OBJ_RECTANGLE, 0,
                      zone.timeCreated, zone.highPrice,
-                     endTime, zone.lowPrice);
+                     farRight, zone.lowPrice);
       }
 
       ObjectSetInteger(0, zone.objName, OBJPROP_COLOR, zoneColor);
@@ -754,8 +857,8 @@ void UpdateFVGDrawings()
       ObjectSetInteger(0, zone.objName, OBJPROP_BACK, true);
       ObjectSetInteger(0, zone.objName, OBJPROP_SELECTABLE, false);
 
-      // Extend rectangle to current time
-      ObjectSetInteger(0, zone.objName, OBJPROP_TIME, 1, endTime);
+      // Extend rectangle to far right
+      ObjectSetInteger(0, zone.objName, OBJPROP_TIME, 1, farRight);
    }
 
    ChartRedraw();
@@ -786,7 +889,7 @@ void PrintFVGReport()
    Print("=================================================");
    Print("       FAIR VALUE GAP (FVG) REPORT (Section 7)   ");
    Print("=================================================");
-   Print("Symbol: ", _Symbol);
+   Print("Symbol: ", _Symbol, " (", g_instrumentType, ")");
    Print("Timeframe: ", TimeframeToString(InpFVGTimeframe));
    Print("Analysis Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
    Print("Current Price: ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), g_digits));
@@ -799,7 +902,7 @@ void PrintFVGReport()
    Print("  Overall Bias: ", TrendBiasToString(g_analysis.fvgBias));
    Print("-------------------------------------------------");
 
-   // Print active FVG zones
+   // Print active FVG zones with age
    int count = ArraySize(g_analysis.zones);
    if(count > 0)
    {
@@ -815,6 +918,7 @@ void PrintFVGReport()
                   " - ", DoubleToString(g_analysis.zones[i].highPrice, g_digits));
             Print("    Size: ", DoubleToString(g_analysis.zones[i].sizePips, 1), " pips");
             Print("    Status: ", statusStr);
+            Print("    Age: ", g_analysis.zones[i].ageBars, " bars");
             Print("    Created: ", TimeToString(g_analysis.zones[i].timeCreated, TIME_DATE|TIME_MINUTES));
          }
       }
@@ -847,18 +951,28 @@ void PrintInitReport()
    Print("=================================================");
    Print("     SWING TRADER PRO - SECTION 7                ");
    Print("     FAIR VALUE GAP (FVG) DETECTION              ");
+   Print("     Claude Core + Grok Enhancements             ");
    Print("=================================================");
    Print("Initialization Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
    Print("-------------------------------------------------");
-   Print("SYMBOL: ", _Symbol);
+   Print("SYMBOL: ", _Symbol, " (", g_instrumentType, ")");
    Print("TIMEFRAME: ", TimeframeToString(InpFVGTimeframe));
+   Print("-------------------------------------------------");
+   Print("AUTO-DETECT SETTINGS:");
+   Print("  Instrument Type: ", g_instrumentType);
+   Print("  Pip Value: ", DoubleToString(g_pipValue, 4));
+   Print("  Max FVG Size: ", g_maxFVGSize, " pips");
    Print("-------------------------------------------------");
    Print("FVG SETTINGS:");
    Print("  Lookback Bars: ", InpFVGLookback);
    Print("  Min FVG Size: ", InpMinFVGSize, " pips");
-   Print("  Max FVG Size: ", InpMaxFVGSize, " pips");
    Print("  Max FVGs Tracked: ", InpMaxFVGCount);
    Print("  Strong Move Required: ", InpRequireStrongMove ? "Yes" : "No");
+   Print("-------------------------------------------------");
+   Print("ALERT SETTINGS:");
+   Print("  Alert on New FVG: ", InpAlertOnNewFVG ? "ON" : "OFF");
+   Print("  Alert on Price Enter: ", InpAlertOnPriceEnter ? "ON" : "OFF");
+   Print("  Push Notifications: ", InpPushNotification ? "ON" : "OFF");
    Print("-------------------------------------------------");
    Print("FVG INTERPRETATION:");
    Print("  Bullish FVG = Demand imbalance (buy zone)");
@@ -877,10 +991,12 @@ void CreatePanel()
    int x = InpPanelX;
    int y = InpPanelY;
 
-   CreateRectangle(g_panelName + "_bg", x, y, 300, 240, clrBlack, 200);
+   CreateRectangle(g_panelName + "_bg", x, y, 300, 280, clrBlack, 200);
 
    CreateLabel(g_panelName + "_title", x + 10, y + 5,
                "FAIR VALUE GAP (FVG)", clrGold, 10, "Arial Bold");
+
+   CreateLabel(g_panelName + "_inst", x + 200, y + 5, g_instrumentType, clrCyan, 9, "Arial");
 
    CreateLabel(g_panelName + "_sep1", x + 10, y + 25,
                "--------------------------------", clrGray, 8, "Courier New");
@@ -983,13 +1099,15 @@ void UpdatePanel()
       {
          double pips = bullDist / g_pipValue;
          nearText = "Bull @ " + DoubleToString(g_analysis.nearestBullish.midPrice, g_digits) +
-                   " (" + DoubleToString(pips, 0) + " pips)";
+                   " (" + DoubleToString(pips, 0) + " pips, " +
+                   IntegerToString(g_analysis.nearestBullish.ageBars) + " bars)";
       }
       else if(g_analysis.bearishCount > 0)
       {
          double pips = bearDist / g_pipValue;
          nearText = "Bear @ " + DoubleToString(g_analysis.nearestBearish.midPrice, g_digits) +
-                   " (" + DoubleToString(pips, 0) + " pips)";
+                   " (" + DoubleToString(pips, 0) + " pips, " +
+                   IntegerToString(g_analysis.nearestBearish.ageBars) + " bars)";
       }
    }
    ObjectSetString(0, g_panelName + "_near_value", OBJPROP_TEXT, nearText);
@@ -1083,23 +1201,26 @@ bool IsPriceInBullishFVG() { return g_analysis.priceInBullishFVG; }
 bool IsPriceInBearishFVG() { return g_analysis.priceInBearishFVG; }
 ENUM_TREND_BIAS GetFVGBias() { return g_analysis.fvgBias; }
 string GetFVGRecommendation() { return g_analysis.recommendation; }
+string GetInstrumentType() { return g_instrumentType; }
 
 // Get nearest FVG zone to current price
-bool GetNearestBullishFVG(double &high, double &low, double &mid)
+bool GetNearestBullishFVG(double &high, double &low, double &mid, int &age)
 {
    if(g_analysis.bullishCount == 0) return false;
    high = g_analysis.nearestBullish.highPrice;
    low = g_analysis.nearestBullish.lowPrice;
    mid = g_analysis.nearestBullish.midPrice;
+   age = g_analysis.nearestBullish.ageBars;
    return true;
 }
 
-bool GetNearestBearishFVG(double &high, double &low, double &mid)
+bool GetNearestBearishFVG(double &high, double &low, double &mid, int &age)
 {
    if(g_analysis.bearishCount == 0) return false;
    high = g_analysis.nearestBearish.highPrice;
    low = g_analysis.nearestBearish.lowPrice;
    mid = g_analysis.nearestBearish.midPrice;
+   age = g_analysis.nearestBearish.ageBars;
    return true;
 }
 //+------------------------------------------------------------------+
