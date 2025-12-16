@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.20"
+#property version   "1.21"
 #property description "Section 7: Fair Value Gap Detection"
 #property description "Identifies price imbalances from rapid moves"
 #property description "Smart Money Concept for entry timing"
@@ -31,7 +31,7 @@ input group "=== FVG Filtering ==="
 input bool     InpRequireStrongMove   = false;    // Require Strong Move (1x ATR)
 input int      InpATRPeriod           = 14;       // ATR Period for Filtering
 input bool     InpFilterByTrend       = true;     // Only Show Trend-Aligned FVGs
-input bool     InpDebugMode           = false;    // Debug Mode - Print FVG Detection Details
+input bool     InpDebugMode           = true;     // Debug Mode - Print FVG Detection Details
 
 input group "=== Alert Settings ==="
 input bool     InpAlertOnNewFVG       = true;     // Alert on New FVG Formation
@@ -145,8 +145,8 @@ int OnInit()
    {
       g_instrumentType = "GOLD";
       g_pipValue = 0.10;           // Gold: 1 pip = $0.10
-      g_maxFVGSize = 2000.0;       // Gold has larger gaps
-      Print("AUTO-DETECT: Gold - pipValue=0.10, maxFVG=2000 pips");
+      g_maxFVGSize = 300.0;        // Realistic FVG max for Gold (~$30)
+      Print("AUTO-DETECT: Gold - pipValue=0.10, maxFVG=300 pips");
    }
    else if(StringFind(sym, "XAG") >= 0 || StringFind(sym, "SILVER") >= 0)
    {
@@ -331,16 +331,16 @@ void AnalyzeFVG()
 }
 
 //+------------------------------------------------------------------+
-//| Update Zone Ages (from Grok)                                      |
+//| Update Zone Ages (from Grok) - FIXED                              |
 //+------------------------------------------------------------------+
 void UpdateZoneAges()
 {
-   int totalBars = Bars(_Symbol, InpFVGTimeframe);
    int count = ArraySize(g_analysis.zones);
 
    for(int i = 0; i < count; i++)
    {
-      g_analysis.zones[i].ageBars = totalBars - g_analysis.zones[i].barIndex - 1;
+      // Use iBarShift to get correct bar count since creation
+      g_analysis.zones[i].ageBars = iBarShift(_Symbol, InpFVGTimeframe, g_analysis.zones[i].timeCreated);
    }
 }
 
@@ -388,14 +388,21 @@ void DetectNewFVGs(int barCount)
 
       // Check for Bullish FVG
       // Gap: Low of right candle > High of left candle
+      // This means price jumped UP so fast that candle 3's low is above candle 1's high
       if(rightLow > leftHigh)
       {
          double gapSize = (rightLow - leftHigh) / g_pipValue;
 
-         if(InpDebugMode && i < 10)  // Only print first 10 for clarity
+         if(InpDebugMode && i < 15)  // Only print first 15 for clarity
          {
-            Print("Bar ", i, " BULLISH GAP found: $", DoubleToString(rightLow - leftHigh, 2),
-                  " = ", DoubleToString(gapSize, 1), " pips");
+            datetime barTime = iTime(_Symbol, InpFVGTimeframe, i);
+            Print("=== BAR ", i, " (", TimeToString(barTime, TIME_DATE|TIME_MINUTES), ") ===");
+            Print("  Candle 1 (older): H=", DoubleToString(leftHigh, g_digits), " L=", DoubleToString(leftLow, g_digits));
+            Print("  Candle 2 (middle): H=", DoubleToString(middleHigh, g_digits), " L=", DoubleToString(middleLow, g_digits));
+            Print("  Candle 3 (newer): H=", DoubleToString(rightHigh, g_digits), " L=", DoubleToString(rightLow, g_digits));
+            Print("  BULLISH GAP: Candle3.Low(", DoubleToString(rightLow, g_digits),
+                  ") > Candle1.High(", DoubleToString(leftHigh, g_digits), ")");
+            Print("  Gap Size: $", DoubleToString(rightLow - leftHigh, 2), " = ", DoubleToString(gapSize, 1), " pips");
          }
 
          if(gapSize >= InpMinFVGSize && gapSize <= g_maxFVGSize)
@@ -437,14 +444,21 @@ void DetectNewFVGs(int barCount)
 
       // Check for Bearish FVG
       // Gap: High of right candle < Low of left candle
+      // This means price dropped DOWN so fast that candle 3's high is below candle 1's low
       if(rightHigh < leftLow)
       {
          double gapSize = (leftLow - rightHigh) / g_pipValue;
 
-         if(InpDebugMode && i < 10)
+         if(InpDebugMode && i < 15)
          {
-            Print("Bar ", i, " BEARISH GAP found: $", DoubleToString(leftLow - rightHigh, 2),
-                  " = ", DoubleToString(gapSize, 1), " pips");
+            datetime barTime = iTime(_Symbol, InpFVGTimeframe, i);
+            Print("=== BAR ", i, " (", TimeToString(barTime, TIME_DATE|TIME_MINUTES), ") ===");
+            Print("  Candle 1 (older): H=", DoubleToString(leftHigh, g_digits), " L=", DoubleToString(leftLow, g_digits));
+            Print("  Candle 2 (middle): H=", DoubleToString(middleHigh, g_digits), " L=", DoubleToString(middleLow, g_digits));
+            Print("  Candle 3 (newer): H=", DoubleToString(rightHigh, g_digits), " L=", DoubleToString(rightLow, g_digits));
+            Print("  BEARISH GAP: Candle3.High(", DoubleToString(rightHigh, g_digits),
+                  ") < Candle1.Low(", DoubleToString(leftLow, g_digits), ")");
+            Print("  Gap Size: $", DoubleToString(leftLow - rightHigh, 2), " = ", DoubleToString(gapSize, 1), " pips");
          }
 
          if(gapSize >= InpMinFVGSize && gapSize <= g_maxFVGSize)
