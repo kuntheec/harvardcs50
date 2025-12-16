@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.21"
+#property version   "1.30"
 #property description "Section 7: Fair Value Gap Detection"
 #property description "Identifies price imbalances from rapid moves"
 #property description "Smart Money Concept for entry timing"
@@ -21,14 +21,14 @@
 //+------------------------------------------------------------------+
 input group "=== FVG Detection Settings ==="
 input int      InpFVGLookback         = 100;      // Lookback Bars for FVG Detection
-input double   InpMinFVGSize          = 5.0;      // Minimum FVG Size (pips)
-input double   InpMaxFVGSize          = 500.0;    // Maximum FVG Size (pips) - Auto-adjusted by symbol
+input double   InpMinFVGSize          = 0.0;      // Min FVG Size (0=auto by timeframe)
+input double   InpMaxFVGSize          = 0.0;      // Max FVG Size (0=auto by timeframe)
 input int      InpMaxFVGCount         = 10;       // Maximum FVGs to Track
 input bool     InpTrackMitigation     = true;     // Track FVG Mitigation
 input ENUM_TIMEFRAMES InpFVGTimeframe = PERIOD_H4; // FVG Timeframe
 
 input group "=== FVG Filtering ==="
-input bool     InpRequireStrongMove   = false;    // Require Strong Move (1x ATR)
+input bool     InpRequireStrongMove   = true;     // Require Strong Move (1x ATR) - SMC Best Practice
 input int      InpATRPeriod           = 14;       // ATR Period for Filtering
 input bool     InpFilterByTrend       = true;     // Only Show Trend-Aligned FVGs
 input bool     InpDebugMode           = true;     // Debug Mode - Print FVG Detection Details
@@ -125,8 +125,53 @@ double            g_point;
 double            g_pipValue;
 string            g_instrumentType;
 
-// Auto-adjusted max FVG size (from Grok)
+// Auto-adjusted FVG size limits (by instrument + timeframe)
+double            g_minFVGSize;
 double            g_maxFVGSize;
+
+//+------------------------------------------------------------------+
+//| Auto-Set FVG Size Limits by Timeframe + Instrument                |
+//| SMC Best Practice: Scale with typical candle sizes                |
+//+------------------------------------------------------------------+
+void AutoSetFVGSizeLimits()
+{
+   // Base values for FOREX on each timeframe
+   double minBase = 5.0;
+   double maxBase = 50.0;
+
+   // Scale by timeframe (larger TF = larger candles = larger FVGs)
+   switch(InpFVGTimeframe)
+   {
+      case PERIOD_M1:   minBase = 2.0;   maxBase = 20.0;   break;
+      case PERIOD_M5:   minBase = 5.0;   maxBase = 50.0;   break;
+      case PERIOD_M15:  minBase = 10.0;  maxBase = 100.0;  break;
+      case PERIOD_M30:  minBase = 15.0;  maxBase = 150.0;  break;
+      case PERIOD_H1:   minBase = 20.0;  maxBase = 200.0;  break;
+      case PERIOD_H4:   minBase = 50.0;  maxBase = 500.0;  break;
+      case PERIOD_D1:   minBase = 100.0; maxBase = 1000.0; break;
+      case PERIOD_W1:   minBase = 200.0; maxBase = 2000.0; break;
+      default:          minBase = 20.0;  maxBase = 200.0;  break;
+   }
+
+   // Scale by instrument (Gold is ~10x more volatile than forex)
+   double multiplier = 1.0;
+   if(g_instrumentType == "GOLD")
+      multiplier = 1.0;      // Gold pips are already $0.10 each, values are appropriate
+   else if(g_instrumentType == "SILVER")
+      multiplier = 2.0;      // Silver is more volatile
+   else if(g_instrumentType == "JPY")
+      multiplier = 1.0;      // JPY pairs similar to forex
+   else
+      multiplier = 1.0;      // Standard forex
+
+   g_minFVGSize = minBase * multiplier;
+   g_maxFVGSize = maxBase * multiplier;
+
+   Print("AUTO-DETECT: ", g_instrumentType, " on ", TimeframeToString(InpFVGTimeframe));
+   Print("  Pip Value: ", DoubleToString(g_pipValue, 4));
+   Print("  Min FVG: ", g_minFVGSize, " pips ($", DoubleToString(g_minFVGSize * g_pipValue, 2), ")");
+   Print("  Max FVG: ", g_maxFVGSize, " pips ($", DoubleToString(g_maxFVGSize * g_pipValue, 2), ")");
+}
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -137,7 +182,7 @@ int OnInit()
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
 
-   // Auto-detect instrument and set pip value + max FVG size
+   // Auto-detect instrument type and pip value
    string sym = _Symbol;
    StringToUpper(sym);
 
@@ -145,22 +190,16 @@ int OnInit()
    {
       g_instrumentType = "GOLD";
       g_pipValue = 0.10;           // Gold: 1 pip = $0.10
-      g_maxFVGSize = 300.0;        // Realistic FVG max for Gold (~$30)
-      Print("AUTO-DETECT: Gold - pipValue=0.10, maxFVG=300 pips");
    }
    else if(StringFind(sym, "XAG") >= 0 || StringFind(sym, "SILVER") >= 0)
    {
       g_instrumentType = "SILVER";
       g_pipValue = 0.01;           // Silver: 1 pip = $0.01
-      g_maxFVGSize = 500.0;
-      Print("AUTO-DETECT: Silver - pipValue=0.01, maxFVG=500 pips");
    }
    else if(StringFind(sym, "JPY") >= 0)
    {
       g_instrumentType = "JPY";
       g_pipValue = g_point * (g_digits == 3 ? 1 : 10);
-      g_maxFVGSize = 300.0;        // JPY pairs have smaller gaps
-      Print("AUTO-DETECT: JPY pair - maxFVG=300 pips");
    }
    else
    {
@@ -171,12 +210,19 @@ int OnInit()
          g_pipValue = g_point;
       else
          g_pipValue = g_point;
-      g_maxFVGSize = 1000.0;       // Standard forex
-      Print("AUTO-DETECT: Forex pair - maxFVG=1000 pips");
    }
 
-   // Allow user override if they set a specific value
-   if(InpMaxFVGSize != 500.0)
+   // Auto-detect FVG size limits based on TIMEFRAME + INSTRUMENT
+   // SMC best practice: scale with candle size
+   AutoSetFVGSizeLimits();
+
+   // Allow user override if they set specific values
+   if(InpMinFVGSize > 0)
+   {
+      g_minFVGSize = InpMinFVGSize;
+      Print("USER OVERRIDE: minFVGSize=", g_minFVGSize);
+   }
+   if(InpMaxFVGSize > 0)
    {
       g_maxFVGSize = InpMaxFVGSize;
       Print("USER OVERRIDE: maxFVGSize=", g_maxFVGSize);
@@ -361,10 +407,10 @@ void DetectNewFVGs(int barCount)
    if(InpDebugMode)
    {
       Print("=== FVG DETECTION DEBUG ===");
-      Print("Instrument: ", g_instrumentType);
+      Print("Instrument: ", g_instrumentType, " | Timeframe: ", TimeframeToString(InpFVGTimeframe));
       Print("Checking bars 2 to ", maxCheck);
       Print("Pip Value: ", DoubleToString(g_pipValue, 4));
-      Print("Min FVG Size: ", InpMinFVGSize, " pips ($", DoubleToString(InpMinFVGSize * g_pipValue, 2), ")");
+      Print("Min FVG Size: ", g_minFVGSize, " pips ($", DoubleToString(g_minFVGSize * g_pipValue, 2), ")");
       Print("Max FVG Size: ", g_maxFVGSize, " pips ($", DoubleToString(g_maxFVGSize * g_pipValue, 2), ")");
       Print("ATR Filter: ", InpRequireStrongMove ? "ON" : "OFF");
    }
@@ -405,7 +451,7 @@ void DetectNewFVGs(int barCount)
             Print("  Gap Size: $", DoubleToString(rightLow - leftHigh, 2), " = ", DoubleToString(gapSize, 1), " pips");
          }
 
-         if(gapSize >= InpMinFVGSize && gapSize <= g_maxFVGSize)
+         if(gapSize >= g_minFVGSize && gapSize <= g_maxFVGSize)
          {
             // Optional: Check for strong move (1x ATR minimum)
             if(InpRequireStrongMove && ArraySize(g_atrBuffer) > i)
@@ -461,7 +507,7 @@ void DetectNewFVGs(int barCount)
             Print("  Gap Size: $", DoubleToString(leftLow - rightHigh, 2), " = ", DoubleToString(gapSize, 1), " pips");
          }
 
-         if(gapSize >= InpMinFVGSize && gapSize <= g_maxFVGSize)
+         if(gapSize >= g_minFVGSize && gapSize <= g_maxFVGSize)
          {
             // Optional: Check for strong move (1x ATR minimum)
             if(InpRequireStrongMove && ArraySize(g_atrBuffer) > i)
@@ -974,14 +1020,17 @@ void PrintInitReport()
    Print("-------------------------------------------------");
    Print("AUTO-DETECT SETTINGS:");
    Print("  Instrument Type: ", g_instrumentType);
+   Print("  Timeframe: ", TimeframeToString(InpFVGTimeframe));
    Print("  Pip Value: ", DoubleToString(g_pipValue, 4));
-   Print("  Max FVG Size: ", g_maxFVGSize, " pips");
+   Print("-------------------------------------------------");
+   Print("FVG SIZE LIMITS (Auto by TF+Instrument):");
+   Print("  Min FVG: ", g_minFVGSize, " pips ($", DoubleToString(g_minFVGSize * g_pipValue, 2), ")");
+   Print("  Max FVG: ", g_maxFVGSize, " pips ($", DoubleToString(g_maxFVGSize * g_pipValue, 2), ")");
    Print("-------------------------------------------------");
    Print("FVG SETTINGS:");
    Print("  Lookback Bars: ", InpFVGLookback);
-   Print("  Min FVG Size: ", InpMinFVGSize, " pips");
    Print("  Max FVGs Tracked: ", InpMaxFVGCount);
-   Print("  Strong Move Required: ", InpRequireStrongMove ? "Yes" : "No");
+   Print("  Strong Move Required: ", InpRequireStrongMove ? "Yes (ATR filter)" : "No");
    Print("-------------------------------------------------");
    Print("ALERT SETTINGS:");
    Print("  Alert on New FVG: ", InpAlertOnNewFVG ? "ON" : "OFF");
