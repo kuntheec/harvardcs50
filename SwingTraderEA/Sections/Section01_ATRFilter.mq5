@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.10"
+#property version   "1.11"
 #property description "Section 1: ATR Volatility Filter"
 #property description "Tests ATR-based market condition classification"
 #property description "H4 timeframe analysis for market volatility"
@@ -58,6 +58,7 @@ ATRFilterResult g_currentResult;                  // Current ATR analysis result
 int            g_digits;                          // Symbol digits
 double         g_point;                           // Symbol point
 double         g_pipValue;                        // Pip value for symbol
+string         g_instrumentType;                  // Instrument type (GOLD, SILVER, JPY, FOREX)
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -67,7 +68,35 @@ int OnInit()
    // Get symbol info
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   g_pipValue = GetPipValue(_Symbol);
+
+   // Auto-detect instrument type and set correct pip value
+   string sym = _Symbol;
+   StringToUpper(sym);
+
+   if(StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0)
+   {
+      g_instrumentType = "GOLD";
+      g_pipValue = 0.10;           // Gold: 1 pip = $0.10
+      Print("AUTO-DETECT: Gold - pipValue=0.10");
+   }
+   else if(StringFind(sym, "XAG") >= 0 || StringFind(sym, "SILVER") >= 0)
+   {
+      g_instrumentType = "SILVER";
+      g_pipValue = 0.01;           // Silver: 1 pip = $0.01
+      Print("AUTO-DETECT: Silver - pipValue=0.01");
+   }
+   else if(StringFind(sym, "JPY") >= 0)
+   {
+      g_instrumentType = "JPY";
+      g_pipValue = g_point * (g_digits == 3 ? 1 : 10);
+      Print("AUTO-DETECT: JPY pair");
+   }
+   else
+   {
+      g_instrumentType = "FOREX";
+      g_pipValue = GetPipValue(_Symbol);
+      Print("AUTO-DETECT: Forex pair");
+   }
 
    // Create ATR indicator handle
    g_atrHandle = iATR(_Symbol, InpATRTimeframe, InpATRPeriod);
@@ -90,6 +119,10 @@ int OnInit()
 
    // Run initial analysis
    AnalyzeATR();
+
+   // FIX: Update panel after initial analysis
+   if(InpShowPanel)
+      UpdatePanel();
 
    return(INIT_SUCCEEDED);
 }
@@ -272,10 +305,10 @@ void PrintInitReport()
    Print("  Spread: ", DoubleToString(InpSpreadPips, 1), " pips");
    Print("-------------------------------------------------");
    Print("SYMBOL INFORMATION:");
-   Print("  Symbol: ", _Symbol);
+   Print("  Symbol: ", _Symbol, " (", g_instrumentType, ")");
    Print("  Digits: ", g_digits);
    Print("  Point: ", DoubleToString(g_point, g_digits));
-   Print("  Pip Value: ", DoubleToString(g_pipValue, g_digits));
+   Print("  Pip Value: ", DoubleToString(g_pipValue, 4), " (", g_instrumentType, ")");
    Print("  Bid: ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), g_digits));
    Print("  Ask: ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_ASK), g_digits));
    Print("  Spread (current): ", DoubleToString(SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * g_point / g_pipValue, 2), " pips");
