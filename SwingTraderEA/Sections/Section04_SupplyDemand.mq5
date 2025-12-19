@@ -5,10 +5,11 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.10"
+#property version   "2.00"
 #property description "Section 4: Supply/Demand Zone Detection"
-#property description "Identifies institutional order blocks"
-#property description "Auto-adapts settings for Gold/JPY/Forex pairs"
+#property description "Mathematical ATR-based zone validation"
+#property description "Scoring system with BOS/CHoCH correlation"
+#property description "SMC Best Practice implementation"
 
 //+------------------------------------------------------------------+
 //| Include Files                                                     |
@@ -20,11 +21,16 @@
 //+------------------------------------------------------------------+
 input group "=== Zone Detection Settings ==="
 input int      InpZoneLookback        = 100;      // Zone Detection Lookback (candles)
-input int      InpMinMoveCandles      = 4;        // Min Candles for Strong Move
-input double   InpMinMovePercent      = 0.5;      // Min Move Size (% of price)
-input double   InpZoneExtendPercent   = 5.0;      // Zone Extension (%)
 input int      InpMaxZones            = 10;       // Max Zones to Track
 input ENUM_TIMEFRAMES InpZoneTimeframe = PERIOD_H4; // Zone Analysis Timeframe
+input int      InpMinScoreToShow      = 5;        // Min Score to Show Zone (0-13)
+input double   InpMaxZoneWidthATR     = 1.0;      // Max Zone Width (x ATR) - filter huge zones
+
+input group "=== ATR Math Settings (SMC Best Practice) ==="
+input double   InpLegOutMultiplier    = 2.0;      // Leg-Out: Move >= X * ATR
+input double   InpBaseMaxMultiplier   = 0.5;      // Base: Body <= X * ATR
+input int      InpBaseCandles         = 3;        // Max Candles in Base Area
+input bool     InpDebugMode           = true;     // Debug Mode - Print Zone Detection Details
 
 input group "=== Zone Filtering ==="
 input bool     InpFilterByEMA         = true;     // Filter Zones by EMA Trend

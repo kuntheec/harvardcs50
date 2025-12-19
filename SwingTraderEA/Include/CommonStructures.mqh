@@ -140,7 +140,15 @@ struct SDZone
    int               barIndex;           // Bar index when formed
    ENUM_ZONE_STATUS  status;             // Fresh/Tested/Broken
    int               touchCount;         // Times price touched zone
-   double            strength;           // Zone strength score
+   double            strength;           // Zone strength score (legacy %)
+
+   // NEW: Mathematical scoring fields (ATR-based)
+   double            legOutDistance;     // Leg-out move distance in price units
+   double            baseBodyMax;        // Max candle body in base area
+   int               score;              // Zone quality score (0-13)
+   bool              causedBOS;          // Did this zone lead to a BOS?
+   bool              alignsWithFib;      // Does zone align with Fib level?
+   double            atrAtFormation;     // ATR value when zone formed
 };
 
 // Fibonacci Level
