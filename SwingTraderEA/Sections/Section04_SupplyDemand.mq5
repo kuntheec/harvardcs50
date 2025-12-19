@@ -161,15 +161,9 @@ int OnInit()
       Print("AUTO-DETECT: Standard forex pair - using balanced settings");
    }
 
-   // Allow user override if they set non-default values
-   if(InpMinMovePercent != 0.5 || InpMinMoveCandles != 4 || InpZoneExtendPercent != 5.0)
-   {
-      // User has customized settings, use their values
-      g_minMovePercent = InpMinMovePercent;
-      g_minMoveCandles = InpMinMoveCandles;
-      g_zoneExtendPercent = InpZoneExtendPercent;
-      Print("USER OVERRIDE: Using custom settings from inputs");
-   }
+   // Note: Legacy adaptive settings are now replaced by ATR-based math method
+   // g_minMovePercent, g_minMoveCandles, g_zoneExtendPercent are kept for compatibility
+   // but the new ATR-based detection uses InpLegOutMultiplier and InpBaseMaxMultiplier
 
    // Initialize arrays
    ArrayResize(g_demandZones, InpMaxZones);
@@ -216,6 +210,10 @@ int OnInit()
 
    // Run initial analysis
    AnalyzeZones();
+
+   // Update panel with initial values
+   if(InpShowPanel)
+      UpdatePanel();
 
    return(INIT_SUCCEEDED);
 }
@@ -417,103 +415,381 @@ void AnalyzeEMA()
 }
 
 //+------------------------------------------------------------------+
-//| Detect Demand Zones (bullish zones)                               |
+//| Detect Demand Zones (bullish zones) - MATHEMATICAL METHOD         |
+//| Uses ATR-based validation: Base <= 0.5×ATR, LegOut >= 2×ATR       |
 //+------------------------------------------------------------------+
 void DetectDemandZones()
 {
    g_demandCount = 0;
 
-   // Look for last bearish candle before strong bullish move
-   for(int i = g_minMoveCandles + 1; i < InpZoneLookback - 1; i++)
+   // Get ATR values for zone detection
+   double atrBuffer[];
+   ArraySetAsSeries(atrBuffer, true);
+   if(CopyBuffer(g_atrHandle, 0, 0, InpZoneLookback + 10, atrBuffer) < InpZoneLookback)
+   {
+      Print("WARNING: Cannot copy ATR buffer for demand zone detection");
+      return;
+   }
+
+   if(InpDebugMode)
+   {
+      Print("=== DEMAND ZONE DETECTION (Mathematical Method) ===");
+      Print("Leg-Out Multiplier: ", InpLegOutMultiplier, "x ATR");
+      Print("Base Max Multiplier: ", InpBaseMaxMultiplier, "x ATR");
+      Print("Max Zone Width: ", InpMaxZoneWidthATR, "x ATR");
+   }
+
+   int zonesFound = 0;
+   int filteredByLegOut = 0;
+   int filteredByBase = 0;
+   int filteredByWidth = 0;
+   int filteredByScore = 0;
+
+   // Look for BASE (consolidation) followed by LEG-OUT (strong bullish move)
+   for(int i = InpBaseCandles + 3; i < InpZoneLookback - 5; i++)
    {
       if(g_demandCount >= InpMaxZones) break;
 
-      // Check if this candle is bearish (potential demand zone origin)
-      if(!IsBearishCandle(i)) continue;
+      double atr = atrBuffer[i];
+      if(atr == 0) continue;
 
-      // Check if there's a strong bullish move after this candle
-      if(IsStrongBullishMove(i - 1, g_minMoveCandles))
+      // Step 1: Find potential BASE area (small candles)
+      // Base = consolidation before the move (candles with body <= 0.5× ATR)
+      double baseHigh = 0;
+      double baseLow = DBL_MAX;
+      double maxBaseBody = 0;
+      bool validBase = true;
+
+      for(int j = 0; j < InpBaseCandles; j++)
       {
-         // This bearish candle is the origin of a demand zone
-         SDZone zone;
-         zone.type = ZONE_DEMAND;
-         zone.upperPrice = g_highBuffer[i];
-         zone.lowerPrice = g_lowBuffer[i];
-         zone.formationTime = g_timeBuffer[i];
-         zone.barIndex = i;
-         zone.status = ZONE_FRESH;
-         zone.touchCount = 0;
+         int idx = i + j;
+         double bodySize = MathAbs(g_closeBuffer[idx] - g_openBuffer[idx]);
+         double maxBody = InpBaseMaxMultiplier * atr;
 
-         // Calculate zone strength based on move size
-         double moveSize = CalculateMoveSize(i - 1, g_minMoveCandles, true);
-         zone.strength = moveSize;
-
-         // Extend zone slightly using adaptive setting
-         double zoneHeight = zone.upperPrice - zone.lowerPrice;
-         zone.lowerPrice -= zoneHeight * (g_zoneExtendPercent / 100.0);
-
-         // Check if zone should be filtered by EMA
-         if(InpFilterByEMA && InpUseEMAFilter)
+         if(bodySize > maxBody)
          {
-            if(g_emaResult.trend != BIAS_BULLISH)
-               continue; // Skip demand zones in bearish EMA trend
+            validBase = false;
+            break;
          }
 
-         // Add zone
-         g_demandZones[g_demandCount] = zone;
-         g_demandCount++;
+         if(bodySize > maxBaseBody) maxBaseBody = bodySize;
+         if(g_highBuffer[idx] > baseHigh) baseHigh = g_highBuffer[idx];
+         if(g_lowBuffer[idx] < baseLow) baseLow = g_lowBuffer[idx];
       }
+
+      if(!validBase)
+      {
+         filteredByBase++;
+         continue;
+      }
+
+      // Step 2: Check for LEG-OUT (strong bullish move AFTER the base)
+      // Measure the move from base to the next few candles
+      double legOutDistance = 0;
+      int legOutCandles = 3;  // Check next 3 candles for leg-out
+
+      for(int j = 1; j <= legOutCandles; j++)
+      {
+         int idx = i - j;
+         if(idx < 0) break;
+         double moveUp = g_highBuffer[idx] - baseHigh;
+         if(moveUp > legOutDistance) legOutDistance = moveUp;
+      }
+
+      double requiredLegOut = InpLegOutMultiplier * atr;
+      if(legOutDistance < requiredLegOut)
+      {
+         filteredByLegOut++;
+         continue;
+      }
+
+      // Step 3: Check zone width (should not be too large)
+      double zoneWidth = baseHigh - baseLow;
+      double maxZoneWidth = InpMaxZoneWidthATR * atr;
+      if(zoneWidth > maxZoneWidth)
+      {
+         filteredByWidth++;
+         continue;
+      }
+
+      // Step 4: Create the zone
+      SDZone zone;
+      zone.type = ZONE_DEMAND;
+      zone.upperPrice = baseHigh;
+      zone.lowerPrice = baseLow;
+      zone.formationTime = g_timeBuffer[i];
+      zone.barIndex = i;
+      zone.status = ZONE_FRESH;
+      zone.touchCount = 0;
+      zone.legOutDistance = legOutDistance;
+      zone.baseBodyMax = maxBaseBody;
+      zone.atrAtFormation = atr;
+      zone.causedBOS = false;  // TODO: Check Section 3 for BOS correlation
+      zone.alignsWithFib = false;  // TODO: Check Section 5 for Fib alignment
+
+      // Step 5: Calculate zone score
+      zone.score = CalculateZoneScoreLocal(legOutDistance, maxBaseBody, true, false, false, atr);
+      zone.strength = (double)zone.score / 13.0 * 100.0;  // Convert to percentage for legacy
+
+      // Filter by minimum score
+      if(zone.score < InpMinScoreToShow)
+      {
+         filteredByScore++;
+         continue;
+      }
+
+      // Check if zone should be filtered by EMA
+      if(InpFilterByEMA && InpUseEMAFilter)
+      {
+         if(g_emaResult.trend != BIAS_BULLISH)
+            continue;
+      }
+
+      // Add zone
+      g_demandZones[g_demandCount] = zone;
+      g_demandCount++;
+      zonesFound++;
+
+      if(InpDebugMode && zonesFound <= 5)
+      {
+         Print("DEMAND ZONE ", zonesFound, " at bar ", i, ":");
+         Print("  Range: ", DoubleToString(baseLow, g_digits), " - ", DoubleToString(baseHigh, g_digits));
+         Print("  Width: $", DoubleToString(zoneWidth, 2), " (", DoubleToString(zoneWidth/atr, 2), "x ATR)");
+         Print("  Leg-Out: $", DoubleToString(legOutDistance, 2), " (", DoubleToString(legOutDistance/atr, 2), "x ATR)");
+         Print("  Base Body Max: $", DoubleToString(maxBaseBody, 2), " (", DoubleToString(maxBaseBody/atr, 2), "x ATR)");
+         Print("  Score: ", zone.score, "/13");
+      }
+   }
+
+   if(InpDebugMode)
+   {
+      Print("--- Demand Zone Summary ---");
+      Print("Zones Found: ", zonesFound);
+      Print("Filtered by Leg-Out (<", InpLegOutMultiplier, "x ATR): ", filteredByLegOut);
+      Print("Filtered by Base (>", InpBaseMaxMultiplier, "x ATR): ", filteredByBase);
+      Print("Filtered by Width (>", InpMaxZoneWidthATR, "x ATR): ", filteredByWidth);
+      Print("Filtered by Score (<", InpMinScoreToShow, "): ", filteredByScore);
    }
 }
 
 //+------------------------------------------------------------------+
-//| Detect Supply Zones (bearish zones)                               |
+//| Detect Supply Zones (bearish zones) - MATHEMATICAL METHOD         |
+//| Uses ATR-based validation: Base <= 0.5×ATR, LegOut >= 2×ATR       |
 //+------------------------------------------------------------------+
 void DetectSupplyZones()
 {
    g_supplyCount = 0;
 
-   // Look for last bullish candle before strong bearish move
-   for(int i = g_minMoveCandles + 1; i < InpZoneLookback - 1; i++)
+   // Get ATR values for zone detection
+   double atrBuffer[];
+   ArraySetAsSeries(atrBuffer, true);
+   if(CopyBuffer(g_atrHandle, 0, 0, InpZoneLookback + 10, atrBuffer) < InpZoneLookback)
+   {
+      Print("WARNING: Cannot copy ATR buffer for supply zone detection");
+      return;
+   }
+
+   if(InpDebugMode)
+   {
+      Print("=== SUPPLY ZONE DETECTION (Mathematical Method) ===");
+   }
+
+   int zonesFound = 0;
+   int filteredByLegOut = 0;
+   int filteredByBase = 0;
+   int filteredByWidth = 0;
+   int filteredByScore = 0;
+
+   // Look for BASE (consolidation) followed by LEG-OUT (strong bearish move)
+   for(int i = InpBaseCandles + 3; i < InpZoneLookback - 5; i++)
    {
       if(g_supplyCount >= InpMaxZones) break;
 
-      // Check if this candle is bullish (potential supply zone origin)
-      if(!IsBullishCandle(i)) continue;
+      double atr = atrBuffer[i];
+      if(atr == 0) continue;
 
-      // Check if there's a strong bearish move after this candle
-      if(IsStrongBearishMove(i - 1, g_minMoveCandles))
+      // Step 1: Find potential BASE area (small candles)
+      double baseHigh = 0;
+      double baseLow = DBL_MAX;
+      double maxBaseBody = 0;
+      bool validBase = true;
+
+      for(int j = 0; j < InpBaseCandles; j++)
       {
-         // This bullish candle is the origin of a supply zone
-         SDZone zone;
-         zone.type = ZONE_SUPPLY;
-         zone.upperPrice = g_highBuffer[i];
-         zone.lowerPrice = g_lowBuffer[i];
-         zone.formationTime = g_timeBuffer[i];
-         zone.barIndex = i;
-         zone.status = ZONE_FRESH;
-         zone.touchCount = 0;
+         int idx = i + j;
+         double bodySize = MathAbs(g_closeBuffer[idx] - g_openBuffer[idx]);
+         double maxBody = InpBaseMaxMultiplier * atr;
 
-         // Calculate zone strength based on move size
-         double moveSize = CalculateMoveSize(i - 1, g_minMoveCandles, false);
-         zone.strength = moveSize;
-
-         // Extend zone slightly using adaptive setting
-         double zoneHeight = zone.upperPrice - zone.lowerPrice;
-         zone.upperPrice += zoneHeight * (g_zoneExtendPercent / 100.0);
-
-         // Check if zone should be filtered by EMA
-         if(InpFilterByEMA && InpUseEMAFilter)
+         if(bodySize > maxBody)
          {
-            if(g_emaResult.trend != BIAS_BEARISH)
-               continue; // Skip supply zones in bullish EMA trend
+            validBase = false;
+            break;
          }
 
-         // Add zone
-         g_supplyZones[g_supplyCount] = zone;
-         g_supplyCount++;
+         if(bodySize > maxBaseBody) maxBaseBody = bodySize;
+         if(g_highBuffer[idx] > baseHigh) baseHigh = g_highBuffer[idx];
+         if(g_lowBuffer[idx] < baseLow) baseLow = g_lowBuffer[idx];
+      }
+
+      if(!validBase)
+      {
+         filteredByBase++;
+         continue;
+      }
+
+      // Step 2: Check for LEG-OUT (strong bearish move AFTER the base)
+      double legOutDistance = 0;
+      int legOutCandles = 3;
+
+      for(int j = 1; j <= legOutCandles; j++)
+      {
+         int idx = i - j;
+         if(idx < 0) break;
+         double moveDown = baseLow - g_lowBuffer[idx];
+         if(moveDown > legOutDistance) legOutDistance = moveDown;
+      }
+
+      double requiredLegOut = InpLegOutMultiplier * atr;
+      if(legOutDistance < requiredLegOut)
+      {
+         filteredByLegOut++;
+         continue;
+      }
+
+      // Step 3: Check zone width
+      double zoneWidth = baseHigh - baseLow;
+      double maxZoneWidth = InpMaxZoneWidthATR * atr;
+      if(zoneWidth > maxZoneWidth)
+      {
+         filteredByWidth++;
+         continue;
+      }
+
+      // Step 4: Create the zone
+      SDZone zone;
+      zone.type = ZONE_SUPPLY;
+      zone.upperPrice = baseHigh;
+      zone.lowerPrice = baseLow;
+      zone.formationTime = g_timeBuffer[i];
+      zone.barIndex = i;
+      zone.status = ZONE_FRESH;
+      zone.touchCount = 0;
+      zone.legOutDistance = legOutDistance;
+      zone.baseBodyMax = maxBaseBody;
+      zone.atrAtFormation = atr;
+      zone.causedBOS = false;
+      zone.alignsWithFib = false;
+
+      // Step 5: Calculate zone score
+      zone.score = CalculateZoneScoreLocal(legOutDistance, maxBaseBody, true, false, false, atr);
+      zone.strength = (double)zone.score / 13.0 * 100.0;
+
+      // Filter by minimum score
+      if(zone.score < InpMinScoreToShow)
+      {
+         filteredByScore++;
+         continue;
+      }
+
+      // Check if zone should be filtered by EMA
+      if(InpFilterByEMA && InpUseEMAFilter)
+      {
+         if(g_emaResult.trend != BIAS_BEARISH)
+            continue;
+      }
+
+      // Add zone
+      g_supplyZones[g_supplyCount] = zone;
+      g_supplyCount++;
+      zonesFound++;
+
+      if(InpDebugMode && zonesFound <= 5)
+      {
+         Print("SUPPLY ZONE ", zonesFound, " at bar ", i, ":");
+         Print("  Range: ", DoubleToString(baseLow, g_digits), " - ", DoubleToString(baseHigh, g_digits));
+         Print("  Width: $", DoubleToString(zoneWidth, 2), " (", DoubleToString(zoneWidth/atr, 2), "x ATR)");
+         Print("  Leg-Out: $", DoubleToString(legOutDistance, 2), " (", DoubleToString(legOutDistance/atr, 2), "x ATR)");
+         Print("  Score: ", zone.score, "/13");
       }
    }
+
+   if(InpDebugMode)
+   {
+      Print("--- Supply Zone Summary ---");
+      Print("Zones Found: ", zonesFound);
+      Print("Filtered by Leg-Out: ", filteredByLegOut);
+      Print("Filtered by Base: ", filteredByBase);
+      Print("Filtered by Width: ", filteredByWidth);
+      Print("Filtered by Score: ", filteredByScore);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Zone Score (Local version) - 0 to 13 points             |
+//| Scoring breakdown:                                                 |
+//|   - Leg-Out >= 2x ATR: +3 points                                   |
+//|   - Base body <= 0.5x ATR: +2 points                               |
+//|   - Fresh zone (untested): +5 points (or +2 if tested)             |
+//|   - Aligns with Fibonacci level: +1 point                          |
+//|   - Caused BOS/CHoCH: +2 points                                    |
+//+------------------------------------------------------------------+
+int CalculateZoneScoreLocal(double legOutDistance, double baseBodyMax,
+                            bool isFresh, bool alignsWithFib,
+                            bool causedBOS, double atr)
+{
+   int score = 0;
+
+   if(atr <= 0) return 0;  // Safety check
+
+   // 1. Leg-Out strength (max 3 points)
+   double legOutRatio = legOutDistance / atr;
+   if(legOutRatio >= InpLegOutMultiplier)
+   {
+      score += 3;
+      if(InpDebugMode)
+         Print("  Score +3: Leg-Out ", DoubleToString(legOutRatio, 2), "x ATR (req: ", InpLegOutMultiplier, "x)");
+   }
+
+   // 2. Base quality (max 2 points)
+   double baseRatio = baseBodyMax / atr;
+   if(baseRatio <= InpBaseMaxMultiplier)
+   {
+      score += 2;
+      if(InpDebugMode)
+         Print("  Score +2: Base body ", DoubleToString(baseRatio, 2), "x ATR (max: ", InpBaseMaxMultiplier, "x)");
+   }
+
+   // 3. Freshness (max 5 points)
+   if(isFresh)
+   {
+      score += 5;
+      if(InpDebugMode)
+         Print("  Score +5: Fresh zone (untested)");
+   }
+   else
+   {
+      score += 2;
+      if(InpDebugMode)
+         Print("  Score +2: Tested zone");
+   }
+
+   // 4. Fibonacci alignment (max 1 point)
+   if(alignsWithFib)
+   {
+      score += 1;
+      if(InpDebugMode)
+         Print("  Score +1: Aligns with Fibonacci level");
+   }
+
+   // 5. Caused BOS/CHoCH (max 2 points)
+   if(causedBOS)
+   {
+      score += 2;
+      if(InpDebugMode)
+         Print("  Score +2: Zone caused BOS/CHoCH");
+   }
+
+   return score;  // Maximum possible: 13 points
 }
 
 //+------------------------------------------------------------------+
@@ -724,13 +1000,13 @@ void DrawZones()
       ObjectSetInteger(0, name, OBJPROP_BACK, true);
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 
-      // Add label
+      // Add label with score
       string labelName = "SDZone_Demand_Label_" + IntegerToString(i);
       ObjectCreate(0, labelName, OBJ_TEXT, 0,
                    g_demandZones[i].formationTime, g_demandZones[i].upperPrice);
-      string labelText = "DEMAND";
+      string labelText = "DEMAND [" + IntegerToString(g_demandZones[i].score) + "/13]";
       if(g_demandZones[i].status == ZONE_TESTED)
-         labelText += " (T:" + IntegerToString(g_demandZones[i].touchCount) + ")";
+         labelText += " T:" + IntegerToString(g_demandZones[i].touchCount);
       ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
       ObjectSetInteger(0, labelName, OBJPROP_COLOR, zoneColor);
       ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
@@ -758,13 +1034,13 @@ void DrawZones()
       ObjectSetInteger(0, name, OBJPROP_BACK, true);
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 
-      // Add label
+      // Add label with score
       string labelName = "SDZone_Supply_Label_" + IntegerToString(i);
       ObjectCreate(0, labelName, OBJ_TEXT, 0,
                    g_supplyZones[i].formationTime, g_supplyZones[i].lowerPrice);
-      string labelText = "SUPPLY";
+      string labelText = "SUPPLY [" + IntegerToString(g_supplyZones[i].score) + "/13]";
       if(g_supplyZones[i].status == ZONE_TESTED)
-         labelText += " (T:" + IntegerToString(g_supplyZones[i].touchCount) + ")";
+         labelText += " T:" + IntegerToString(g_supplyZones[i].touchCount);
       ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
       ObjectSetInteger(0, labelName, OBJPROP_COLOR, zoneColor);
       ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
@@ -842,11 +1118,12 @@ void PrintZoneReport()
    Print("Current Price: ", DoubleToString(currentPrice, g_digits));
    Print("-------------------------------------------------");
 
-   // Active Settings
-   Print("ACTIVE SETTINGS (auto-adaptive):");
-   Print("  Min Move %: ", DoubleToString(g_minMovePercent, 2), "%");
-   Print("  Min Move Candles: ", g_minMoveCandles);
-   Print("  Zone Extension: ", DoubleToString(g_zoneExtendPercent, 1), "%");
+   // ATR Math Settings
+   Print("ATR MATH SETTINGS:");
+   Print("  Leg-Out Required: >= ", InpLegOutMultiplier, "x ATR");
+   Print("  Base Body Max: <= ", InpBaseMaxMultiplier, "x ATR");
+   Print("  Max Zone Width: <= ", InpMaxZoneWidthATR, "x ATR");
+   Print("  Min Score Required: ", InpMinScoreToShow, "/13");
    Print("-------------------------------------------------");
 
    // ATR Status
@@ -878,13 +1155,18 @@ void PrintZoneReport()
    }
    Print("  Total: ", g_demandCount, " (Fresh: ", freshDemand, ", Tested: ", testedDemand, ")");
 
-   for(int i = 0; i < g_demandCount && i < 3; i++)
+   for(int i = 0; i < g_demandCount && i < 5; i++)
    {
       if(g_demandZones[i].status == ZONE_BROKEN) continue;
       string statusStr = (g_demandZones[i].status == ZONE_FRESH) ? "FRESH" : "TESTED";
+      double zoneWidth = g_demandZones[i].upperPrice - g_demandZones[i].lowerPrice;
       Print("  Zone ", i+1, ": ", DoubleToString(g_demandZones[i].lowerPrice, g_digits),
-            " - ", DoubleToString(g_demandZones[i].upperPrice, g_digits),
-            " [", statusStr, "] Strength: ", DoubleToString(g_demandZones[i].strength, 2), "%");
+            " - ", DoubleToString(g_demandZones[i].upperPrice, g_digits), " [", statusStr, "]");
+      Print("    Score: ", g_demandZones[i].score, "/13 | Width: $", DoubleToString(zoneWidth, 2));
+      Print("    Leg-Out: $", DoubleToString(g_demandZones[i].legOutDistance, 2),
+            " (", DoubleToString(g_demandZones[i].legOutDistance / g_demandZones[i].atrAtFormation, 2), "x ATR)");
+      Print("    Base Body: $", DoubleToString(g_demandZones[i].baseBodyMax, 2),
+            " (", DoubleToString(g_demandZones[i].baseBodyMax / g_demandZones[i].atrAtFormation, 2), "x ATR)");
    }
    Print("-------------------------------------------------");
 
@@ -898,13 +1180,18 @@ void PrintZoneReport()
    }
    Print("  Total: ", g_supplyCount, " (Fresh: ", freshSupply, ", Tested: ", testedSupply, ")");
 
-   for(int i = 0; i < g_supplyCount && i < 3; i++)
+   for(int i = 0; i < g_supplyCount && i < 5; i++)
    {
       if(g_supplyZones[i].status == ZONE_BROKEN) continue;
       string statusStr = (g_supplyZones[i].status == ZONE_FRESH) ? "FRESH" : "TESTED";
+      double zoneWidth = g_supplyZones[i].upperPrice - g_supplyZones[i].lowerPrice;
       Print("  Zone ", i+1, ": ", DoubleToString(g_supplyZones[i].lowerPrice, g_digits),
-            " - ", DoubleToString(g_supplyZones[i].upperPrice, g_digits),
-            " [", statusStr, "] Strength: ", DoubleToString(g_supplyZones[i].strength, 2), "%");
+            " - ", DoubleToString(g_supplyZones[i].upperPrice, g_digits), " [", statusStr, "]");
+      Print("    Score: ", g_supplyZones[i].score, "/13 | Width: $", DoubleToString(zoneWidth, 2));
+      Print("    Leg-Out: $", DoubleToString(g_supplyZones[i].legOutDistance, 2),
+            " (", DoubleToString(g_supplyZones[i].legOutDistance / g_supplyZones[i].atrAtFormation, 2), "x ATR)");
+      Print("    Base Body: $", DoubleToString(g_supplyZones[i].baseBodyMax, 2),
+            " (", DoubleToString(g_supplyZones[i].baseBodyMax / g_supplyZones[i].atrAtFormation, 2), "x ATR)");
    }
    Print("-------------------------------------------------");
 
@@ -1024,27 +1311,32 @@ void PrintInitReport()
    Print("SYMBOL: ", _Symbol, " (", g_instrumentType, ")");
    Print("TIMEFRAME: ", TimeframeToString(InpZoneTimeframe));
    Print("-------------------------------------------------");
-   Print("AUTO-ADAPTIVE SETTINGS:");
+   Print("INSTRUMENT SETTINGS:");
    Print("  Instrument Type: ", g_instrumentType);
-   Print("  Min Move %: ", DoubleToString(g_minMovePercent, 2), "%");
-   Print("  Min Move Candles: ", g_minMoveCandles);
-   Print("  Zone Extension: ", DoubleToString(g_zoneExtendPercent, 1), "%");
    Print("  Pip Size: ", DoubleToString(g_pipSize, 4));
+   Print("-------------------------------------------------");
+   Print("ATR MATH SETTINGS (SMC Best Practice):");
+   Print("  Leg-Out Required: >= ", InpLegOutMultiplier, "x ATR");
+   Print("  Base Body Max: <= ", InpBaseMaxMultiplier, "x ATR");
+   Print("  Max Zone Width: <= ", InpMaxZoneWidthATR, "x ATR");
+   Print("  Base Candles: ", InpBaseCandles);
+   Print("  Min Score to Show: ", InpMinScoreToShow, "/13");
    Print("-------------------------------------------------");
    Print("ZONE DETECTION SETTINGS:");
    Print("  Lookback: ", InpZoneLookback, " candles");
    Print("  Max Zones: ", InpMaxZones);
    Print("-------------------------------------------------");
+   Print("SCORING SYSTEM (0-13 points):");
+   Print("  +3: Leg-Out >= ", InpLegOutMultiplier, "x ATR");
+   Print("  +2: Base body <= ", InpBaseMaxMultiplier, "x ATR");
+   Print("  +5: Fresh zone (untested)");
+   Print("  +2: Tested zone");
+   Print("  +1: Aligns with Fibonacci");
+   Print("  +2: Caused BOS/CHoCH");
+   Print("-------------------------------------------------");
    Print("ALERT SETTINGS:");
    Print("  Zone Entry Alerts: ", InpAlertOnZoneEntry ? "ON" : "OFF");
    Print("  Push Notifications: ", InpPushNotification ? "ON" : "OFF");
-   Print("-------------------------------------------------");
-   Print("ZONE RULES:");
-   Print("  DEMAND: Last bearish candle before strong up move");
-   Print("  SUPPLY: Last bullish candle before strong down move");
-   Print("  FRESH: Zone not yet tested by price");
-   Print("  TESTED: Price has touched zone (weaker)");
-   Print("  BROKEN: Price has broken through zone (invalid)");
    Print("=================================================");
    Print("");
 }
@@ -1189,19 +1481,25 @@ void UpdatePanel()
    ObjectSetString(0, g_panelName + "_demand_value", OBJPROP_TEXT, IntegerToString(activeDemand));
    ObjectSetString(0, g_panelName + "_supply_value", OBJPROP_TEXT, IntegerToString(activeSupply));
 
-   // Update nearest zones
+   // Update nearest zones with scores
    SDZone nearestDemand = GetNearestDemandZone();
    SDZone nearestSupply = GetNearestSupplyZone();
 
-   if(nearestDemand.strength > 0)
-      ObjectSetString(0, g_panelName + "_nd_value", OBJPROP_TEXT,
-                      DoubleToString(nearestDemand.upperPrice, g_digits));
+   if(nearestDemand.strength > 0 || nearestDemand.score > 0)
+   {
+      string demandText = DoubleToString(nearestDemand.upperPrice, g_digits) +
+                          " [" + IntegerToString(nearestDemand.score) + "]";
+      ObjectSetString(0, g_panelName + "_nd_value", OBJPROP_TEXT, demandText);
+   }
    else
       ObjectSetString(0, g_panelName + "_nd_value", OBJPROP_TEXT, "None");
 
-   if(nearestSupply.strength > 0)
-      ObjectSetString(0, g_panelName + "_ns_value", OBJPROP_TEXT,
-                      DoubleToString(nearestSupply.lowerPrice, g_digits));
+   if(nearestSupply.strength > 0 || nearestSupply.score > 0)
+   {
+      string supplyText = DoubleToString(nearestSupply.lowerPrice, g_digits) +
+                          " [" + IntegerToString(nearestSupply.score) + "]";
+      ObjectSetString(0, g_panelName + "_ns_value", OBJPROP_TEXT, supplyText);
+   }
    else
       ObjectSetString(0, g_panelName + "_ns_value", OBJPROP_TEXT, "None");
 
