@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.11"
+#property version   "1.12"
 #property description "Section 3: Break of Structure & Change of Character"
 #property description "Smart Money Concepts (SMC/ICT) Structure Analysis"
 #property description "Detects swing points, BOS, and CHoCH on H4"
@@ -29,6 +29,11 @@ input bool     InpRequireCHoCHConfirm = true;     // Require CHoCH Confirmation 
 input group "=== Higher Timeframe Filter (Optional) ==="
 input bool     InpUseHTFFilter        = false;    // Use D1 Trend Filter
 input ENUM_TIMEFRAMES InpHTFTimeframe = PERIOD_D1; // Higher Timeframe
+
+input group "=== Volume Confirmation (Optional) ==="
+input bool     InpUseVolumeConfirm    = true;     // Use Volume Spike for CHoCH
+input double   InpVolumeMultiplier    = 1.5;      // Volume Spike Multiplier (vs 20-period avg)
+input int      InpVolumeLookback      = 20;       // Volume Average Lookback
 
 input group "=== EMA Settings (from Section 2) ==="
 input bool     InpUseEMAFilter        = true;     // Use EMA Trend Filter
@@ -113,6 +118,11 @@ bool           g_chochPending = false;           // CHoCH waiting for confirmati
 StructureBreak g_pendingCHoCH;                   // Pending CHoCH details
 int            g_chochConfirmBars = 0;           // Bars since CHoCH
 
+// Volume analysis
+double         g_volumeBuffer[];
+double         g_avgVolume = 0;
+bool           g_hasVolumeSpike = false;
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
 //+------------------------------------------------------------------+
@@ -158,6 +168,7 @@ int OnInit()
    ArraySetAsSeries(g_lowBuffer, true);
    ArraySetAsSeries(g_closeBuffer, true);
    ArraySetAsSeries(g_timeBuffer, true);
+   ArraySetAsSeries(g_volumeBuffer, true);
 
    // Create EMA handles if filter enabled
    if(InpUseEMAFilter)
@@ -281,6 +292,10 @@ void AnalyzeStructure()
    // Analyze Higher Timeframe trend if enabled
    if(InpUseHTFFilter)
       AnalyzeHTFTrend();
+
+   // Analyze Volume for CHoCH confirmation
+   if(InpUseVolumeConfirm)
+      AnalyzeVolume();
 
    // Detect swing points
    DetectSwingPoints();
@@ -561,9 +576,13 @@ void DetectBOSandCHoCH()
       // In bullish structure, breaking below swing low = CHoCH (potential reversal)
       else if(CheckBreakBelow(lastSwingLow))
       {
+         // Check volume confirmation if enabled
+         bool volumeOK = HasVolumeConfirmation();
+
          if(InpRequireCHoCHConfirm)
          {
             // Set as pending CHoCH, wait for confirmation
+            // Volume spike adds credibility but doesn't block pending status
             g_chochPending = true;
             g_chochConfirmBars = 0;
             g_pendingCHoCH.type = STRUCTURE_CHOCH;
@@ -573,11 +592,13 @@ void DetectBOSandCHoCH()
             g_pendingCHoCH.barIndex = 0;
             g_pendingCHoCH.confirmed = false;
             g_currentStructure = BIAS_NEUTRAL;
-            Print("CHoCH PENDING: Bearish break detected, waiting for confirmation");
+
+            string volMsg = volumeOK ? " [VOLUME SPIKE]" : " [Low Volume - watch carefully]";
+            Print("CHoCH PENDING: Bearish break detected, waiting for confirmation", volMsg);
          }
-         else
+         else if(volumeOK)
          {
-            // Immediate CHoCH (no confirmation required)
+            // Immediate CHoCH (requires volume confirmation if enabled)
             g_hasCHoCH = true;
             g_lastCHoCH.type = STRUCTURE_CHOCH;
             g_lastCHoCH.direction = BIAS_BEARISH;
@@ -585,6 +606,21 @@ void DetectBOSandCHoCH()
             g_lastCHoCH.breakTime = g_timeBuffer[0];
             g_lastCHoCH.barIndex = 0;
             g_lastCHoCH.confirmed = InpRequireClose ? (currentClose < lastSwingLow) : true;
+            g_currentStructure = BIAS_NEUTRAL;
+            Print("CHoCH IMMEDIATE: Bearish break with volume confirmation");
+         }
+         else
+         {
+            // Volume check failed - treat as weak signal, set as pending
+            Print("CHoCH WEAK: Bearish break but LOW VOLUME - treating as pending");
+            g_chochPending = true;
+            g_chochConfirmBars = 0;
+            g_pendingCHoCH.type = STRUCTURE_CHOCH;
+            g_pendingCHoCH.direction = BIAS_BEARISH;
+            g_pendingCHoCH.breakLevel = lastSwingLow;
+            g_pendingCHoCH.breakTime = g_timeBuffer[0];
+            g_pendingCHoCH.barIndex = 0;
+            g_pendingCHoCH.confirmed = false;
             g_currentStructure = BIAS_NEUTRAL;
          }
       }
@@ -614,9 +650,13 @@ void DetectBOSandCHoCH()
       // In bearish structure, breaking above swing high = CHoCH (potential reversal)
       else if(CheckBreakAbove(lastSwingHigh))
       {
+         // Check volume confirmation if enabled
+         bool volumeOK = HasVolumeConfirmation();
+
          if(InpRequireCHoCHConfirm)
          {
             // Set as pending CHoCH, wait for confirmation
+            // Volume spike adds credibility but doesn't block pending status
             g_chochPending = true;
             g_chochConfirmBars = 0;
             g_pendingCHoCH.type = STRUCTURE_CHOCH;
@@ -626,11 +666,13 @@ void DetectBOSandCHoCH()
             g_pendingCHoCH.barIndex = 0;
             g_pendingCHoCH.confirmed = false;
             g_currentStructure = BIAS_NEUTRAL;
-            Print("CHoCH PENDING: Bullish break detected, waiting for confirmation");
+
+            string volMsg = volumeOK ? " [VOLUME SPIKE]" : " [Low Volume - watch carefully]";
+            Print("CHoCH PENDING: Bullish break detected, waiting for confirmation", volMsg);
          }
-         else
+         else if(volumeOK)
          {
-            // Immediate CHoCH (no confirmation required)
+            // Immediate CHoCH (requires volume confirmation if enabled)
             g_hasCHoCH = true;
             g_lastCHoCH.type = STRUCTURE_CHOCH;
             g_lastCHoCH.direction = BIAS_BULLISH;
@@ -638,6 +680,21 @@ void DetectBOSandCHoCH()
             g_lastCHoCH.breakTime = g_timeBuffer[0];
             g_lastCHoCH.barIndex = 0;
             g_lastCHoCH.confirmed = InpRequireClose ? (currentClose > lastSwingHigh) : true;
+            g_currentStructure = BIAS_NEUTRAL;
+            Print("CHoCH IMMEDIATE: Bullish break with volume confirmation");
+         }
+         else
+         {
+            // Volume check failed - treat as weak signal, set as pending
+            Print("CHoCH WEAK: Bullish break but LOW VOLUME - treating as pending");
+            g_chochPending = true;
+            g_chochConfirmBars = 0;
+            g_pendingCHoCH.type = STRUCTURE_CHOCH;
+            g_pendingCHoCH.direction = BIAS_BULLISH;
+            g_pendingCHoCH.breakLevel = lastSwingHigh;
+            g_pendingCHoCH.breakTime = g_timeBuffer[0];
+            g_pendingCHoCH.barIndex = 0;
+            g_pendingCHoCH.confirmed = false;
             g_currentStructure = BIAS_NEUTRAL;
          }
       }
@@ -692,6 +749,54 @@ void AnalyzeHTFTrend()
       g_htfTrend = BIAS_BEARISH;
    else
       g_htfTrend = BIAS_NEUTRAL;
+}
+
+//+------------------------------------------------------------------+
+//| Analyze Volume for CHoCH Confirmation                             |
+//| Checks if current bar has volume spike (above average)            |
+//+------------------------------------------------------------------+
+void AnalyzeVolume()
+{
+   g_hasVolumeSpike = false;
+
+   if(!InpUseVolumeConfirm)
+      return;
+
+   // Copy volume data
+   int volumeNeeded = InpVolumeLookback + 1;
+   if(CopyTickVolume(_Symbol, InpStructureTF, 0, volumeNeeded, g_volumeBuffer) < volumeNeeded)
+      return;
+
+   // Calculate average volume (excluding current bar)
+   double totalVolume = 0;
+   for(int i = 1; i <= InpVolumeLookback; i++)
+   {
+      totalVolume += (double)g_volumeBuffer[i];
+   }
+   g_avgVolume = totalVolume / InpVolumeLookback;
+
+   // Check if current bar has volume spike
+   double currentVolume = (double)g_volumeBuffer[0];
+   if(g_avgVolume > 0 && currentVolume >= g_avgVolume * InpVolumeMultiplier)
+   {
+      g_hasVolumeSpike = true;
+      if(InpPrintReport)
+         Print("VOLUME SPIKE: ", DoubleToString(currentVolume, 0),
+               " vs Avg: ", DoubleToString(g_avgVolume, 0),
+               " (", DoubleToString(currentVolume / g_avgVolume, 2), "x)");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check if CHoCH has Volume Confirmation                            |
+//| Returns true if volume check passes or is disabled                 |
+//+------------------------------------------------------------------+
+bool HasVolumeConfirmation()
+{
+   if(!InpUseVolumeConfirm)
+      return true;  // If disabled, always passes
+
+   return g_hasVolumeSpike;
 }
 
 //+------------------------------------------------------------------+
@@ -1087,6 +1192,13 @@ void PrintInitReport()
    Print("  Swing Lookback: ", InpSwingLookback, " bars each side");
    Print("  BOS Lookback: ", InpBOSLookback, " candles");
    Print("  Require Close: ", InpRequireClose ? "YES" : "NO");
+   Print("  CHoCH Confirmation: ", InpRequireCHoCHConfirm ? "YES (wait for BOS)" : "NO (immediate)");
+   Print("-------------------------------------------------");
+   Print("CHoCH CONFIRMATION METHODS:");
+   Print("  1. Candle Close: ", InpRequireClose ? "YES" : "NO");
+   Print("  2. Volume Spike: ", InpUseVolumeConfirm ? ("YES (" + DoubleToString(InpVolumeMultiplier, 1) + "x avg)") : "NO");
+   Print("  3. HTF Filter: ", InpUseHTFFilter ? ("YES (" + TimeframeToString(InpHTFTimeframe) + ")") : "NO");
+   Print("  4. Retest/BOS: ", InpRequireCHoCHConfirm ? "YES" : "NO");
    Print("-------------------------------------------------");
    Print("DEFINITIONS:");
    Print("  BOS (Break of Structure): Trend continuation");
@@ -1109,7 +1221,7 @@ void CreatePanel()
    int x = InpPanelX;
    int y = InpPanelY;
 
-   CreateRectangle(g_panelName + "_bg", x, y, 320, 280, clrBlack, 200);
+   CreateRectangle(g_panelName + "_bg", x, y, 320, 300, clrBlack, 200);
 
    CreateLabel(g_panelName + "_title", x + 10, y + 5,
                "BOS/CHoCH STRUCTURE ANALYSIS", clrGold, 10, "Arial Bold");
@@ -1132,6 +1244,14 @@ void CreatePanel()
    {
       CreateLabel(g_panelName + "_ema_label", x + 10, y + yOff, "EMA Trend:", clrWhite, 9, "Arial");
       CreateLabel(g_panelName + "_ema_value", x + 120, y + yOff, "--", clrYellow, 9, "Arial Bold");
+      yOff += 20;
+   }
+
+   // Volume Status
+   if(InpUseVolumeConfirm)
+   {
+      CreateLabel(g_panelName + "_vol_label", x + 10, y + yOff, "Volume:", clrWhite, 9, "Arial");
+      CreateLabel(g_panelName + "_vol_value", x + 120, y + yOff, "--", clrGray, 9, "Arial Bold");
       yOff += 20;
    }
 
@@ -1217,6 +1337,32 @@ void UpdatePanel()
 
       ObjectSetString(0, g_panelName + "_ema_value", OBJPROP_TEXT, emaTrend);
       ObjectSetInteger(0, g_panelName + "_ema_value", OBJPROP_COLOR, emaColor);
+   }
+
+   // Update Volume
+   if(InpUseVolumeConfirm)
+   {
+      string volText = "";
+      color volColor = clrGray;
+
+      if(g_hasVolumeSpike)
+      {
+         volText = "SPIKE!";
+         volColor = clrLimeGreen;
+      }
+      else if(g_avgVolume > 0)
+      {
+         volText = "Normal";
+         volColor = clrGray;
+      }
+      else
+      {
+         volText = "--";
+         volColor = clrGray;
+      }
+
+      ObjectSetString(0, g_panelName + "_vol_value", OBJPROP_TEXT, volText);
+      ObjectSetInteger(0, g_panelName + "_vol_value", OBJPROP_COLOR, volColor);
    }
 
    // Update Swing Points
