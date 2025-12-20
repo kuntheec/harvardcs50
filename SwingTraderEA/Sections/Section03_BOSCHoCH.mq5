@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.00"
+#property version   "1.10"
 #property description "Section 3: Break of Structure & Change of Character"
 #property description "Smart Money Concepts (SMC/ICT) Structure Analysis"
 #property description "Detects swing points, BOS, and CHoCH on H4"
@@ -23,6 +23,12 @@ input int      InpSwingLookback       = 3;        // Swing Detection Lookback (b
 input int      InpBOSLookback         = 50;       // BOS/CHoCH Lookback (candles)
 input bool     InpRequireClose        = true;     // Require Candle Close for Confirmation
 input ENUM_TIMEFRAMES InpStructureTF  = PERIOD_H4; // Structure Analysis Timeframe
+input int      InpMinSwingsForStructure = 3;      // Min Swings for Structure Confirmation (3-4)
+input bool     InpRequireCHoCHConfirm = true;     // Require CHoCH Confirmation (pullback + BOS)
+
+input group "=== Higher Timeframe Filter (Optional) ==="
+input bool     InpUseHTFFilter        = false;    // Use D1 Trend Filter
+input ENUM_TIMEFRAMES InpHTFTimeframe = PERIOD_D1; // Higher Timeframe
 
 input group "=== EMA Settings (from Section 2) ==="
 input bool     InpUseEMAFilter        = true;     // Use EMA Trend Filter
@@ -92,6 +98,20 @@ string         g_panelName = "BOSCHoCHPanel";
 // Symbol info
 int            g_digits;
 double         g_point;
+double         g_pipSize;
+string         g_instrumentType;
+
+// Higher timeframe filter
+int            g_htfEmaFastHandle;
+int            g_htfEmaSlowHandle;
+double         g_htfEmaFastBuffer[];
+double         g_htfEmaSlowBuffer[];
+ENUM_TREND_BIAS g_htfTrend = BIAS_NEUTRAL;
+
+// CHoCH confirmation tracking
+bool           g_chochPending = false;           // CHoCH waiting for confirmation
+StructureBreak g_pendingCHoCH;                   // Pending CHoCH details
+int            g_chochConfirmBars = 0;           // Bars since CHoCH
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -101,6 +121,35 @@ int OnInit()
    // Get symbol info
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   // Auto-detect instrument type and set pip size
+   string sym = _Symbol;
+   StringToUpper(sym);
+
+   if(StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0)
+   {
+      g_instrumentType = "GOLD";
+      g_pipSize = 0.10;  // Gold: 1 pip = $0.10
+      Print("AUTO-DETECT: Gold pair - pip size = 0.10");
+   }
+   else if(StringFind(sym, "XAG") >= 0 || StringFind(sym, "SILVER") >= 0)
+   {
+      g_instrumentType = "SILVER";
+      g_pipSize = 0.01;
+      Print("AUTO-DETECT: Silver pair - pip size = 0.01");
+   }
+   else if(StringFind(sym, "JPY") >= 0)
+   {
+      g_instrumentType = "JPY";
+      g_pipSize = g_point * (g_digits == 3 ? 1 : 10);
+      Print("AUTO-DETECT: JPY pair");
+   }
+   else
+   {
+      g_instrumentType = "FOREX";
+      g_pipSize = g_point * (g_digits == 5 ? 10 : 1);
+      Print("AUTO-DETECT: Standard forex pair");
+   }
 
    // Initialize arrays
    ArrayResize(g_swingHighs, InpMaxSwingPoints);
@@ -135,6 +184,22 @@ int OnInit()
          return(INIT_FAILED);
       }
       ArraySetAsSeries(g_atrBuffer, true);
+   }
+
+   // Create HTF EMA handles if filter enabled
+   if(InpUseHTFFilter)
+   {
+      g_htfEmaFastHandle = iMA(_Symbol, InpHTFTimeframe, InpEMAFastPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      g_htfEmaSlowHandle = iMA(_Symbol, InpHTFTimeframe, InpEMASlowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+
+      if(g_htfEmaFastHandle == INVALID_HANDLE || g_htfEmaSlowHandle == INVALID_HANDLE)
+      {
+         Print("ERROR: Failed to create HTF EMA handles");
+         return(INIT_FAILED);
+      }
+      ArraySetAsSeries(g_htfEmaFastBuffer, true);
+      ArraySetAsSeries(g_htfEmaSlowBuffer, true);
+      Print("HTF Filter enabled: ", TimeframeToString(InpHTFTimeframe));
    }
 
    // Print initialization
@@ -209,6 +274,10 @@ void AnalyzeStructure()
    if(InpUseEMAFilter)
       AnalyzeEMA();
 
+   // Analyze Higher Timeframe trend if enabled
+   if(InpUseHTFFilter)
+      AnalyzeHTFTrend();
+
    // Detect swing points
    DetectSwingPoints();
 
@@ -280,6 +349,28 @@ void AnalyzeEMA()
 }
 
 //+------------------------------------------------------------------+
+//| Sort swing points by barIndex (ascending = oldest first)          |
+//| After sort: index 0 = most recent (smallest barIndex)             |
+//+------------------------------------------------------------------+
+void SortSwingPoints(SwingPoint &arr[], int count)
+{
+   // Simple bubble sort by barIndex ascending (smallest barIndex = most recent)
+   for(int i = 0; i < count - 1; i++)
+   {
+      for(int j = 0; j < count - i - 1; j++)
+      {
+         if(arr[j].barIndex > arr[j + 1].barIndex)
+         {
+            // Swap
+            SwingPoint temp = arr[j];
+            arr[j] = arr[j + 1];
+            arr[j + 1] = temp;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Detect Swing High and Swing Low Points                            |
 //+------------------------------------------------------------------+
 void DetectSwingPoints()
@@ -318,6 +409,10 @@ void DetectSwingPoints()
          }
       }
    }
+
+   // CRITICAL FIX: Sort by barIndex ascending so index 0 = most recent swing
+   SortSwingPoints(g_swingHighs, g_swingHighCount);
+   SortSwingPoints(g_swingLows, g_swingLowCount);
 }
 
 //+------------------------------------------------------------------+
@@ -370,6 +465,7 @@ bool IsSwingLow(int index)
 
 //+------------------------------------------------------------------+
 //| Detect BOS and CHoCH                                              |
+//| IMPROVED: CHoCH requires confirmation (pullback + new BOS)        |
 //+------------------------------------------------------------------+
 void DetectBOSandCHoCH()
 {
@@ -390,13 +486,51 @@ void DetectBOSandCHoCH()
    double currentHigh = g_highBuffer[0];
    double currentLow = g_lowBuffer[0];
 
-   // Determine previous structure based on swing points
-   // If making Higher Highs and Higher Lows = Bullish
-   // If making Lower Highs and Lower Lows = Bearish
+   // Determine previous structure based on swing points (uses 3-4 swings now)
    DeterminePreviousStructure();
 
-   // Check for Break of Structure (BOS) - continuation
-   // Check for Change of Character (CHoCH) - reversal
+   // Check for pending CHoCH confirmation
+   if(g_chochPending && InpRequireCHoCHConfirm)
+   {
+      g_chochConfirmBars++;
+
+      // CHoCH confirmed if we get a BOS in the new direction
+      if(g_pendingCHoCH.direction == BIAS_BULLISH)
+      {
+         // Bullish CHoCH confirmed by breaking above the high after the CHoCH break
+         if(CheckBreakAbove(lastSwingHigh) && lastSwingHigh > g_pendingCHoCH.breakLevel)
+         {
+            g_hasCHoCH = true;
+            g_lastCHoCH = g_pendingCHoCH;
+            g_lastCHoCH.confirmed = true;
+            g_currentStructure = BIAS_BULLISH;
+            g_previousStructure = BIAS_BULLISH;
+            g_chochPending = false;
+            Print("CHoCH CONFIRMED: Bullish reversal validated by new BOS");
+         }
+      }
+      else if(g_pendingCHoCH.direction == BIAS_BEARISH)
+      {
+         // Bearish CHoCH confirmed by breaking below the low after the CHoCH break
+         if(CheckBreakBelow(lastSwingLow) && lastSwingLow < g_pendingCHoCH.breakLevel)
+         {
+            g_hasCHoCH = true;
+            g_lastCHoCH = g_pendingCHoCH;
+            g_lastCHoCH.confirmed = true;
+            g_currentStructure = BIAS_BEARISH;
+            g_previousStructure = BIAS_BEARISH;
+            g_chochPending = false;
+            Print("CHoCH CONFIRMED: Bearish reversal validated by new BOS");
+         }
+      }
+
+      // Cancel pending CHoCH if price moves back to original structure
+      if(g_chochConfirmBars > 10)  // Timeout after 10 bars
+      {
+         Print("CHoCH CANCELLED: Timeout - no confirmation within 10 bars");
+         g_chochPending = false;
+      }
+   }
 
    // Bullish BOS: Price breaks above last swing high (in bullish structure)
    if(g_previousStructure == BIAS_BULLISH)
@@ -412,18 +546,43 @@ void DetectBOSandCHoCH()
          g_lastBOS.barIndex = 0;
          g_lastBOS.confirmed = InpRequireClose ? (currentClose > lastSwingHigh) : true;
          g_currentStructure = BIAS_BULLISH;
+
+         // Cancel any pending bearish CHoCH
+         if(g_chochPending && g_pendingCHoCH.direction == BIAS_BEARISH)
+         {
+            Print("Pending CHoCH cancelled - bullish BOS continuation");
+            g_chochPending = false;
+         }
       }
       // In bullish structure, breaking below swing low = CHoCH (potential reversal)
       else if(CheckBreakBelow(lastSwingLow))
       {
-         g_hasCHoCH = true;
-         g_lastCHoCH.type = STRUCTURE_CHOCH;
-         g_lastCHoCH.direction = BIAS_BEARISH;
-         g_lastCHoCH.breakLevel = lastSwingLow;
-         g_lastCHoCH.breakTime = g_timeBuffer[0];
-         g_lastCHoCH.barIndex = 0;
-         g_lastCHoCH.confirmed = InpRequireClose ? (currentClose < lastSwingLow) : true;
-         g_currentStructure = BIAS_NEUTRAL; // Potential reversal
+         if(InpRequireCHoCHConfirm)
+         {
+            // Set as pending CHoCH, wait for confirmation
+            g_chochPending = true;
+            g_chochConfirmBars = 0;
+            g_pendingCHoCH.type = STRUCTURE_CHOCH;
+            g_pendingCHoCH.direction = BIAS_BEARISH;
+            g_pendingCHoCH.breakLevel = lastSwingLow;
+            g_pendingCHoCH.breakTime = g_timeBuffer[0];
+            g_pendingCHoCH.barIndex = 0;
+            g_pendingCHoCH.confirmed = false;
+            g_currentStructure = BIAS_NEUTRAL;
+            Print("CHoCH PENDING: Bearish break detected, waiting for confirmation");
+         }
+         else
+         {
+            // Immediate CHoCH (no confirmation required)
+            g_hasCHoCH = true;
+            g_lastCHoCH.type = STRUCTURE_CHOCH;
+            g_lastCHoCH.direction = BIAS_BEARISH;
+            g_lastCHoCH.breakLevel = lastSwingLow;
+            g_lastCHoCH.breakTime = g_timeBuffer[0];
+            g_lastCHoCH.barIndex = 0;
+            g_lastCHoCH.confirmed = InpRequireClose ? (currentClose < lastSwingLow) : true;
+            g_currentStructure = BIAS_NEUTRAL;
+         }
       }
    }
    // Bearish BOS: Price breaks below last swing low (in bearish structure)
@@ -440,18 +599,43 @@ void DetectBOSandCHoCH()
          g_lastBOS.barIndex = 0;
          g_lastBOS.confirmed = InpRequireClose ? (currentClose < lastSwingLow) : true;
          g_currentStructure = BIAS_BEARISH;
+
+         // Cancel any pending bullish CHoCH
+         if(g_chochPending && g_pendingCHoCH.direction == BIAS_BULLISH)
+         {
+            Print("Pending CHoCH cancelled - bearish BOS continuation");
+            g_chochPending = false;
+         }
       }
       // In bearish structure, breaking above swing high = CHoCH (potential reversal)
       else if(CheckBreakAbove(lastSwingHigh))
       {
-         g_hasCHoCH = true;
-         g_lastCHoCH.type = STRUCTURE_CHOCH;
-         g_lastCHoCH.direction = BIAS_BULLISH;
-         g_lastCHoCH.breakLevel = lastSwingHigh;
-         g_lastCHoCH.breakTime = g_timeBuffer[0];
-         g_lastCHoCH.barIndex = 0;
-         g_lastCHoCH.confirmed = InpRequireClose ? (currentClose > lastSwingHigh) : true;
-         g_currentStructure = BIAS_NEUTRAL; // Potential reversal
+         if(InpRequireCHoCHConfirm)
+         {
+            // Set as pending CHoCH, wait for confirmation
+            g_chochPending = true;
+            g_chochConfirmBars = 0;
+            g_pendingCHoCH.type = STRUCTURE_CHOCH;
+            g_pendingCHoCH.direction = BIAS_BULLISH;
+            g_pendingCHoCH.breakLevel = lastSwingHigh;
+            g_pendingCHoCH.breakTime = g_timeBuffer[0];
+            g_pendingCHoCH.barIndex = 0;
+            g_pendingCHoCH.confirmed = false;
+            g_currentStructure = BIAS_NEUTRAL;
+            Print("CHoCH PENDING: Bullish break detected, waiting for confirmation");
+         }
+         else
+         {
+            // Immediate CHoCH (no confirmation required)
+            g_hasCHoCH = true;
+            g_lastCHoCH.type = STRUCTURE_CHOCH;
+            g_lastCHoCH.direction = BIAS_BULLISH;
+            g_lastCHoCH.breakLevel = lastSwingHigh;
+            g_lastCHoCH.breakTime = g_timeBuffer[0];
+            g_lastCHoCH.barIndex = 0;
+            g_lastCHoCH.confirmed = InpRequireClose ? (currentClose > lastSwingHigh) : true;
+            g_currentStructure = BIAS_NEUTRAL;
+         }
       }
    }
    else // NEUTRAL - determining initial structure
@@ -485,28 +669,90 @@ void DetectBOSandCHoCH()
 }
 
 //+------------------------------------------------------------------+
+//| Analyze Higher Timeframe Trend (D1)                               |
+//+------------------------------------------------------------------+
+void AnalyzeHTFTrend()
+{
+   if(!InpUseHTFFilter)
+   {
+      g_htfTrend = BIAS_NEUTRAL;
+      return;
+   }
+
+   if(CopyBuffer(g_htfEmaFastHandle, 0, 0, 1, g_htfEmaFastBuffer) < 1) return;
+   if(CopyBuffer(g_htfEmaSlowHandle, 0, 0, 1, g_htfEmaSlowBuffer) < 1) return;
+
+   if(g_htfEmaFastBuffer[0] > g_htfEmaSlowBuffer[0])
+      g_htfTrend = BIAS_BULLISH;
+   else if(g_htfEmaFastBuffer[0] < g_htfEmaSlowBuffer[0])
+      g_htfTrend = BIAS_BEARISH;
+   else
+      g_htfTrend = BIAS_NEUTRAL;
+}
+
+//+------------------------------------------------------------------+
 //| Determine Previous Structure from Swing Points                    |
+//| IMPROVED: Uses 3-4 swings for proper HH/HL/LH/LL confirmation     |
 //+------------------------------------------------------------------+
 void DeterminePreviousStructure()
 {
-   if(g_swingHighCount < 2 || g_swingLowCount < 2)
+   int minSwings = InpMinSwingsForStructure;  // Default 3
+
+   if(g_swingHighCount < minSwings || g_swingLowCount < minSwings)
    {
       g_previousStructure = BIAS_NEUTRAL;
       return;
    }
 
-   // Compare consecutive swing highs and lows
-   bool higherHigh = g_swingHighs[0].price > g_swingHighs[1].price;
-   bool higherLow = g_swingLows[0].price > g_swingLows[1].price;
-   bool lowerHigh = g_swingHighs[0].price < g_swingHighs[1].price;
-   bool lowerLow = g_swingLows[0].price < g_swingLows[1].price;
+   // Count HH/LH patterns in swing highs (use last 3-4 swings)
+   int hhCount = 0;  // Higher High count
+   int lhCount = 0;  // Lower High count
 
-   if(higherHigh && higherLow)
+   for(int i = 0; i < minSwings - 1 && i < g_swingHighCount - 1; i++)
+   {
+      if(g_swingHighs[i].price > g_swingHighs[i + 1].price)
+         hhCount++;  // Higher High
+      else if(g_swingHighs[i].price < g_swingHighs[i + 1].price)
+         lhCount++;  // Lower High
+   }
+
+   // Count HL/LL patterns in swing lows (use last 3-4 swings)
+   int hlCount = 0;  // Higher Low count
+   int llCount = 0;  // Lower Low count
+
+   for(int i = 0; i < minSwings - 1 && i < g_swingLowCount - 1; i++)
+   {
+      if(g_swingLows[i].price > g_swingLows[i + 1].price)
+         hlCount++;  // Higher Low
+      else if(g_swingLows[i].price < g_swingLows[i + 1].price)
+         llCount++;  // Lower Low
+   }
+
+   // Determine structure:
+   // BULLISH = Majority HH + Majority HL
+   // BEARISH = Majority LH + Majority LL
+   // NEUTRAL = Mixed signals
+
+   int threshold = (minSwings - 1) / 2;  // At least half must agree
+
+   bool bullishHighs = (hhCount > threshold);
+   bool bullishLows = (hlCount > threshold);
+   bool bearishHighs = (lhCount > threshold);
+   bool bearishLows = (llCount > threshold);
+
+   if(bullishHighs && bullishLows)
       g_previousStructure = BIAS_BULLISH;
-   else if(lowerHigh && lowerLow)
+   else if(bearishHighs && bearishLows)
       g_previousStructure = BIAS_BEARISH;
    else
       g_previousStructure = BIAS_NEUTRAL;
+
+   // Debug output
+   if(InpPrintReport)
+   {
+      Print("Structure Analysis: HH=", hhCount, " LH=", lhCount, " HL=", hlCount, " LL=", llCount);
+      Print("Result: ", TrendBiasToString(g_previousStructure));
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -532,14 +778,14 @@ bool CheckBreakBelow(double level)
 }
 
 //+------------------------------------------------------------------+
-//| Draw Swing Points on Chart                                        |
+//| Draw Swing Points on Chart - DYNAMIC LABELS (HH/LH, HL/LL)        |
 //+------------------------------------------------------------------+
 void DrawSwingPoints()
 {
    // Remove old swing markers
    ObjectsDeleteAll(0, "Swing_");
 
-   // Draw Swing Highs
+   // Draw Swing Highs with dynamic HH/LH labels
    for(int i = 0; i < g_swingHighCount; i++)
    {
       string name = "Swing_High_" + IntegerToString(i);
@@ -550,16 +796,25 @@ void DrawSwingPoints()
       ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_BOTTOM);
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 
-      // Add label
+      // Determine label: HH (Higher High) or LH (Lower High)
+      string labelText = "SH";  // Default: Swing High
+      if(i < g_swingHighCount - 1)
+      {
+         if(g_swingHighs[i].price > g_swingHighs[i + 1].price)
+            labelText = "HH";  // Higher High (current > previous)
+         else
+            labelText = "LH";  // Lower High (current < previous)
+      }
+
       string labelName = "Swing_High_Label_" + IntegerToString(i);
       ObjectCreate(0, labelName, OBJ_TEXT, 0, g_swingHighs[i].time, g_swingHighs[i].price);
-      ObjectSetString(0, labelName, OBJPROP_TEXT, "HH");
+      ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
       ObjectSetInteger(0, labelName, OBJPROP_COLOR, InpSwingHighColor);
       ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
       ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LOWER);
    }
 
-   // Draw Swing Lows
+   // Draw Swing Lows with dynamic HL/LL labels
    for(int i = 0; i < g_swingLowCount; i++)
    {
       string name = "Swing_Low_" + IntegerToString(i);
@@ -570,10 +825,19 @@ void DrawSwingPoints()
       ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_TOP);
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 
-      // Add label
+      // Determine label: HL (Higher Low) or LL (Lower Low)
+      string labelText = "SL";  // Default: Swing Low
+      if(i < g_swingLowCount - 1)
+      {
+         if(g_swingLows[i].price > g_swingLows[i + 1].price)
+            labelText = "HL";  // Higher Low (current > previous)
+         else
+            labelText = "LL";  // Lower Low (current < previous)
+      }
+
       string labelName = "Swing_Low_Label_" + IntegerToString(i);
       ObjectCreate(0, labelName, OBJ_TEXT, 0, g_swingLows[i].time, g_swingLows[i].price);
-      ObjectSetString(0, labelName, OBJPROP_TEXT, "HL");
+      ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
       ObjectSetInteger(0, labelName, OBJPROP_COLOR, InpSwingLowColor);
       ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
       ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_UPPER);
