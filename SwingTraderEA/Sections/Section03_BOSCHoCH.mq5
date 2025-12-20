@@ -119,7 +119,7 @@ StructureBreak g_pendingCHoCH;                   // Pending CHoCH details
 int            g_chochConfirmBars = 0;           // Bars since CHoCH
 
 // Volume analysis
-double         g_volumeBuffer[];
+long         g_volumeBuffer[];
 double         g_avgVolume = 0;
 bool           g_hasVolumeSpike = false;
 
