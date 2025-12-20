@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.10"
+#property version   "1.11"
 #property description "Section 3: Break of Structure & Change of Character"
 #property description "Smart Money Concepts (SMC/ICT) Structure Analysis"
 #property description "Detects swing points, BOS, and CHoCH on H4"
@@ -211,6 +211,10 @@ int OnInit()
 
    // Run initial analysis
    AnalyzeStructure();
+
+   // Update panel with initial values (same fix as Section 4)
+   if(InpShowPanel)
+      UpdatePanel();
 
    return(INIT_SUCCEEDED);
 }
