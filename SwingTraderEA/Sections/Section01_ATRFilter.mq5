@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.11"
+#property version   "1.12"
 #property description "Section 1: ATR Volatility Filter"
 #property description "Tests ATR-based market condition classification"
 #property description "H4 timeframe analysis for market volatility"
@@ -43,6 +43,19 @@ input double   InpLegOutMultiplier    = 2.0;      // Leg-Out ATR Multiplier (min
 input double   InpBaseMaxMultiplier   = 0.5;      // Base ATR Multiplier (body <= X * ATR)
 input int      InpATRHistoryBars      = 200;      // ATR History Bars to Cache
 
+input group "=== ATR Advanced Settings ==="
+input int      InpATRTrendBars        = 10;       // ATR Trend Calculation Bars
+input int      InpATRPercentileBars   = 50;       // ATR Percentile Lookback Bars
+input double   InpATRExpandThresh     = 1.2;      // ATR Expansion Threshold (1.2 = 20% above avg)
+input double   InpATRContractThresh   = 0.8;      // ATR Contraction Threshold (0.8 = 20% below avg)
+input double   InpATRSqueezeThresh    = 0.6;      // Volatility Squeeze Threshold (60% of normal)
+
+input group "=== SL/TP ATR Multipliers (Section 12) ==="
+input double   InpATRStopMultiplier   = 1.5;      // Stop Loss ATR Multiplier (SL = X × ATR)
+input double   InpATRTP1Multiplier    = 2.0;      // TP1 ATR Multiplier (TP1 = X × ATR)
+input double   InpATRTP2Multiplier    = 3.0;      // TP2 ATR Multiplier (TP2 = X × ATR)
+input double   InpATRTP3Multiplier    = 4.5;      // TP3 ATR Multiplier (TP3 = X × ATR)
+
 input group "=== Account Settings (Reference) ==="
 input double   InpStartingBalance     = 500.0;    // Starting Balance ($)
 input double   InpSpreadPips          = 0.8;      // Broker Spread (pips)
@@ -59,6 +72,16 @@ int            g_digits;                          // Symbol digits
 double         g_point;                           // Symbol point
 double         g_pipValue;                        // Pip value for symbol
 string         g_instrumentType;                  // Instrument type (GOLD, SILVER, JPY, FOREX)
+
+// Advanced ATR Analysis Variables
+double         g_atrAverage;                      // Average ATR over lookback period
+double         g_atrPercentile;                   // Current ATR percentile (0-100)
+double         g_atrTrendSlope;                   // ATR trend slope (positive = expanding)
+double         g_normalizedATR;                   // ATR as % of price (NATR)
+bool           g_volatilitySqueeze;               // Is volatility in squeeze?
+bool           g_volatilityExpanding;             // Is volatility expanding?
+bool           g_volatilityContracting;           // Is volatility contracting?
+string         g_volatilityTrend;                 // "EXPANDING", "CONTRACTING", "STABLE"
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -222,9 +245,87 @@ void AnalyzeATR()
       g_currentResult.reason = "Normal market conditions - Trading allowed";
    }
 
+   // Perform advanced ATR analysis
+   AnalyzeATRAdvanced();
+
    // Print report if enabled
    if(InpPrintReport)
       PrintATRReport();
+}
+
+//+------------------------------------------------------------------+
+//| Advanced ATR Analysis (Trend, Percentile, NATR)                   |
+//+------------------------------------------------------------------+
+void AnalyzeATRAdvanced()
+{
+   // Ensure we have enough data
+   int barsNeeded = MathMax(InpATRTrendBars, InpATRPercentileBars) + 5;
+   if(ArraySize(g_atrBuffer) < barsNeeded)
+   {
+      int copied = CopyBuffer(g_atrHandle, 0, 0, barsNeeded, g_atrBuffer);
+      if(copied < barsNeeded)
+      {
+         Print("WARNING: AnalyzeATRAdvanced - Insufficient data");
+         return;
+      }
+   }
+
+   // 1. Calculate ATR Average (over percentile lookback)
+   double sum = 0.0;
+   int count = MathMin(InpATRPercentileBars, ArraySize(g_atrBuffer));
+   for(int i = 0; i < count; i++)
+      sum += g_atrBuffer[i];
+   g_atrAverage = (count > 0) ? sum / count : g_atrBuffer[0];
+
+   // 2. Calculate ATR Percentile (where does current ATR rank?)
+   double currentATR = g_atrBuffer[0];
+   int belowCount = 0;
+   for(int i = 1; i < count; i++)
+   {
+      if(g_atrBuffer[i] < currentATR)
+         belowCount++;
+   }
+   g_atrPercentile = (count > 1) ? (double)belowCount / (count - 1) * 100.0 : 50.0;
+
+   // 3. Calculate ATR Trend Slope (is volatility expanding or contracting?)
+   int trendBars = MathMin(InpATRTrendBars, ArraySize(g_atrBuffer));
+   double startATR = g_atrBuffer[trendBars - 1];
+   double endATR = g_atrBuffer[0];
+   g_atrTrendSlope = (startATR > 0) ? (endATR - startATR) / startATR * 100.0 : 0.0;
+
+   // 4. Calculate Normalized ATR (ATR as % of price)
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   g_normalizedATR = (currentPrice > 0) ? (g_atrBuffer[0] / currentPrice) * 100.0 : 0.0;
+
+   // 5. Detect Volatility Squeeze (ATR below threshold of average)
+   double atrRatio = (g_atrAverage > 0) ? currentATR / g_atrAverage : 1.0;
+   g_volatilitySqueeze = (atrRatio < InpATRSqueezeThresh);
+
+   // 6. Classify Volatility Trend
+   if(atrRatio >= InpATRExpandThresh)
+   {
+      g_volatilityExpanding = true;
+      g_volatilityContracting = false;
+      g_volatilityTrend = "EXPANDING";
+   }
+   else if(atrRatio <= InpATRContractThresh)
+   {
+      g_volatilityExpanding = false;
+      g_volatilityContracting = true;
+      g_volatilityTrend = "CONTRACTING";
+   }
+   else
+   {
+      g_volatilityExpanding = false;
+      g_volatilityContracting = false;
+      g_volatilityTrend = "STABLE";
+   }
+
+   // Adjust trading condition based on volatility squeeze
+   if(g_volatilitySqueeze && g_currentResult.condition == MARKET_QUIET)
+   {
+      g_currentResult.reason += " | VOLATILITY SQUEEZE detected - Breakout may follow";
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -251,6 +352,19 @@ void PrintATRReport()
    Print("MARKET CONDITION: ", MarketConditionToString(g_currentResult.condition));
    Print("TRADING ALLOWED: ", g_currentResult.tradingAllowed ? "YES" : "NO");
    Print("REASON: ", g_currentResult.reason);
+   Print("-------------------------------------------------");
+   Print("");
+   Print("=== ADVANCED ATR ANALYSIS ===");
+   Print("-------------------------------------------------");
+   Print("ATR Average (", InpATRPercentileBars, " bars): ", DoubleToString(GetATRPipsFromPrice(g_atrAverage), 2), " pips");
+   Print("ATR vs Average: ", DoubleToString((g_atrAverage > 0 ? g_atrBuffer[0] / g_atrAverage * 100.0 : 100.0), 1), "%");
+   Print("ATR Percentile: ", DoubleToString(g_atrPercentile, 1), "% (higher = more volatile than usual)");
+   Print("ATR Trend Slope: ", DoubleToString(g_atrTrendSlope, 2), "% (", (g_atrTrendSlope > 0 ? "rising" : "falling"), ")");
+   Print("Normalized ATR (NATR): ", DoubleToString(g_normalizedATR, 4), "% of price");
+   Print("-------------------------------------------------");
+   Print("VOLATILITY TREND: ", g_volatilityTrend);
+   Print("Volatility Expanding: ", g_volatilityExpanding ? "YES" : "NO");
+   Print("Volatility Squeeze: ", g_volatilitySqueeze ? "YES - Breakout Alert!" : "NO");
    Print("-------------------------------------------------");
 
    // Print historical ATR values
@@ -334,12 +448,40 @@ void PrintInitReport()
    Print("  Base Max Multiplier: ", InpBaseMaxMultiplier, "x ATR (body <= ", InpBaseMaxMultiplier, " x ATR)");
    Print("  ATR History Bars: ", InpATRHistoryBars);
    Print("-------------------------------------------------");
-   Print("NEW PUBLIC FUNCTIONS:");
+   Print("ATR-BASED SL/TP SETTINGS (for Section 12):");
+   Print("  Stop Loss: ", InpATRStopMultiplier, "x ATR");
+   Print("  TP1: ", InpATRTP1Multiplier, "x ATR (R:R = ", DoubleToString(InpATRTP1Multiplier/InpATRStopMultiplier, 2), ")");
+   Print("  TP2: ", InpATRTP2Multiplier, "x ATR (R:R = ", DoubleToString(InpATRTP2Multiplier/InpATRStopMultiplier, 2), ")");
+   Print("  TP3: ", InpATRTP3Multiplier, "x ATR (R:R = ", DoubleToString(InpATRTP3Multiplier/InpATRStopMultiplier, 2), ")");
+   Print("-------------------------------------------------");
+   Print("ADVANCED ATR SETTINGS:");
+   Print("  ATR Trend Bars: ", InpATRTrendBars);
+   Print("  ATR Percentile Lookback: ", InpATRPercentileBars);
+   Print("  Expansion Threshold: ", InpATRExpandThresh, "x (", (InpATRExpandThresh-1)*100, "% above avg)");
+   Print("  Contraction Threshold: ", InpATRContractThresh, "x (", (1-InpATRContractThresh)*100, "% below avg)");
+   Print("  Squeeze Threshold: ", InpATRSqueezeThresh, "x (", InpATRSqueezeThresh*100, "% of avg)");
+   Print("-------------------------------------------------");
+   Print("PUBLIC FUNCTIONS (for other sections):");
    Print("  GetATRPriceAtBar(bar) - ATR in price units");
    Print("  GetATRPipsAtBar(bar)  - ATR in pips");
    Print("  IsValidLegOut(move, bar) - Check leg-out >= 2x ATR");
    Print("  IsValidBase(body, bar)   - Check base <= 0.5x ATR");
    Print("  CalculateZoneScore()     - Zone quality score (0-13)");
+   Print("-------------------------------------------------");
+   Print("NEW ADVANCED FUNCTIONS:");
+   Print("  GetATRAverage()     - Average ATR over lookback");
+   Print("  GetATRPercentile()  - Current ATR percentile (0-100)");
+   Print("  GetATRTrendSlope()  - ATR trend (+expanding/-contracting)");
+   Print("  GetNormalizedATR()  - ATR as % of price (NATR)");
+   Print("  IsVolatilitySqueeze() - Breakout alert");
+   Print("  GetVolatilityTrend()  - EXPANDING/CONTRACTING/STABLE");
+   Print("-------------------------------------------------");
+   Print("SL/TP FUNCTIONS (for Section 12):");
+   Print("  CalculateATRStopLoss() - SL distance in price");
+   Print("  CalculateATRTP1/2/3()  - TP distances in price");
+   Print("  GetATRBasedLevels()    - All levels at once");
+   Print("  GetVolatilityPositionMultiplier() - Position size adj");
+   Print("  IsGoodSwingConditions()  - Combined volatility check");
    Print("=================================================");
    Print("");
 }
@@ -352,8 +494,8 @@ void CreatePanel()
    int x = InpPanelX;
    int y = InpPanelY;
 
-   // Background rectangle
-   CreateRectangle(g_panelName + "_bg", x, y, 280, 180, clrBlack, 200);
+   // Background rectangle (expanded for advanced analysis)
+   CreateRectangle(g_panelName + "_bg", x, y, 300, 290, clrBlack, 200);
 
    // Title
    CreateLabel(g_panelName + "_title", x + 10, y + 5,
@@ -401,8 +543,46 @@ void CreatePanel()
                " | Extreme: >" + DoubleToString(InpATRExtremeThreshold, 0),
                clrGray, 8, "Arial");
 
+   // Separator for Advanced Section
+   CreateLabel(g_panelName + "_sep4", x + 10, y + 165,
+               "----------------------------", clrGray, 8, "Courier New");
+
+   // Advanced ATR Analysis Section
+   CreateLabel(g_panelName + "_adv_title", x + 10, y + 180,
+               "ADVANCED ATR ANALYSIS", clrCyan, 9, "Arial Bold");
+
+   // ATR vs Average
+   CreateLabel(g_panelName + "_avg_label", x + 10, y + 198,
+               "ATR vs Avg:", clrWhite, 8, "Arial");
+   CreateLabel(g_panelName + "_avg_value", x + 150, y + 198,
+               "-- %", clrYellow, 8, "Arial");
+
+   // ATR Percentile
+   CreateLabel(g_panelName + "_pct_label", x + 10, y + 213,
+               "Percentile:", clrWhite, 8, "Arial");
+   CreateLabel(g_panelName + "_pct_value", x + 150, y + 213,
+               "-- %", clrYellow, 8, "Arial");
+
+   // Volatility Trend
+   CreateLabel(g_panelName + "_trend_label", x + 10, y + 228,
+               "Vol Trend:", clrWhite, 8, "Arial");
+   CreateLabel(g_panelName + "_trend_value", x + 150, y + 228,
+               "ANALYZING", clrYellow, 8, "Arial Bold");
+
+   // Squeeze Alert
+   CreateLabel(g_panelName + "_squeeze_label", x + 10, y + 243,
+               "Squeeze Alert:", clrWhite, 8, "Arial");
+   CreateLabel(g_panelName + "_squeeze_value", x + 150, y + 243,
+               "--", clrYellow, 8, "Arial");
+
+   // Swing Conditions
+   CreateLabel(g_panelName + "_swing_label", x + 10, y + 258,
+               "Swing Ready:", clrWhite, 8, "Arial");
+   CreateLabel(g_panelName + "_swing_value", x + 150, y + 258,
+               "--", clrYellow, 8, "Arial Bold");
+
    // Time
-   CreateLabel(g_panelName + "_time", x + 10, y + 165,
+   CreateLabel(g_panelName + "_time", x + 10, y + 275,
                "Last Update: --", clrGray, 8, "Arial");
 }
 
@@ -446,6 +626,44 @@ void UpdatePanel()
 
    ObjectSetString(0, g_panelName + "_trade_value", OBJPROP_TEXT, tradeText);
    ObjectSetInteger(0, g_panelName + "_trade_value", OBJPROP_COLOR, tradeColor);
+
+   // Update Advanced ATR Analysis fields
+   // ATR vs Average
+   double atrRatio = (g_atrAverage > 0) ? g_atrBuffer[0] / g_atrAverage * 100.0 : 100.0;
+   ObjectSetString(0, g_panelName + "_avg_value", OBJPROP_TEXT,
+                   DoubleToString(atrRatio, 1) + "%");
+   color ratioColor = (atrRatio > 120) ? clrOrange : (atrRatio < 80) ? clrAqua : clrLimeGreen;
+   ObjectSetInteger(0, g_panelName + "_avg_value", OBJPROP_COLOR, ratioColor);
+
+   // ATR Percentile
+   ObjectSetString(0, g_panelName + "_pct_value", OBJPROP_TEXT,
+                   DoubleToString(g_atrPercentile, 1) + "%");
+   color pctColor = (g_atrPercentile > 80) ? clrOrange : (g_atrPercentile < 20) ? clrAqua : clrYellow;
+   ObjectSetInteger(0, g_panelName + "_pct_value", OBJPROP_COLOR, pctColor);
+
+   // Volatility Trend
+   ObjectSetString(0, g_panelName + "_trend_value", OBJPROP_TEXT, g_volatilityTrend);
+   color trendColor = clrYellow;
+   if(g_volatilityTrend == "EXPANDING")
+      trendColor = clrOrange;
+   else if(g_volatilityTrend == "CONTRACTING")
+      trendColor = clrAqua;
+   else
+      trendColor = clrLimeGreen;
+   ObjectSetInteger(0, g_panelName + "_trend_value", OBJPROP_COLOR, trendColor);
+
+   // Squeeze Alert
+   string squeezeText = g_volatilitySqueeze ? "YES - Breakout!" : "NO";
+   color squeezeColor = g_volatilitySqueeze ? clrMagenta : clrGray;
+   ObjectSetString(0, g_panelName + "_squeeze_value", OBJPROP_TEXT, squeezeText);
+   ObjectSetInteger(0, g_panelName + "_squeeze_value", OBJPROP_COLOR, squeezeColor);
+
+   // Swing Ready
+   bool swingReady = IsGoodSwingConditions();
+   string swingText = swingReady ? "YES" : "NO";
+   color swingColor = swingReady ? clrLimeGreen : clrRed;
+   ObjectSetString(0, g_panelName + "_swing_value", OBJPROP_TEXT, swingText);
+   ObjectSetInteger(0, g_panelName + "_swing_value", OBJPROP_COLOR, swingColor);
 
    // Update time
    ObjectSetString(0, g_panelName + "_time", OBJPROP_TEXT,
@@ -705,5 +923,184 @@ bool RefreshATRBuffer(int barsNeeded = 0)
       return false;
    }
    return true;
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Convert ATR Price to Pips (helper for display)               |
+//+------------------------------------------------------------------+
+double GetATRPipsFromPrice(double atrPrice)
+{
+   if(atrPrice == 0.0) return 0.0;
+
+   // Gold: ATR is in dollars, 1 pip = $0.10, so multiply by 10
+   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
+      return atrPrice * 10.0;
+   else
+      return PointsToPips(_Symbol, atrPrice);
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Get ATR Average (for external use)                           |
+//+------------------------------------------------------------------+
+double GetATRAverage() { return g_atrAverage; }
+
+//+------------------------------------------------------------------+
+//| NEW: Get ATR Percentile (0-100, higher = more volatile than usual)|
+//+------------------------------------------------------------------+
+double GetATRPercentile() { return g_atrPercentile; }
+
+//+------------------------------------------------------------------+
+//| NEW: Get ATR Trend Slope (positive = expanding volatility)        |
+//+------------------------------------------------------------------+
+double GetATRTrendSlope() { return g_atrTrendSlope; }
+
+//+------------------------------------------------------------------+
+//| NEW: Get Normalized ATR (ATR as % of price)                       |
+//+------------------------------------------------------------------+
+double GetNormalizedATR() { return g_normalizedATR; }
+
+//+------------------------------------------------------------------+
+//| NEW: Is Volatility in Squeeze? (potential breakout)               |
+//+------------------------------------------------------------------+
+bool IsVolatilitySqueeze() { return g_volatilitySqueeze; }
+
+//+------------------------------------------------------------------+
+//| NEW: Is Volatility Expanding?                                     |
+//+------------------------------------------------------------------+
+bool IsVolatilityExpanding() { return g_volatilityExpanding; }
+
+//+------------------------------------------------------------------+
+//| NEW: Get Volatility Trend ("EXPANDING", "CONTRACTING", "STABLE")  |
+//+------------------------------------------------------------------+
+string GetVolatilityTrend() { return g_volatilityTrend; }
+
+//+------------------------------------------------------------------+
+//| NEW: Calculate Stop Loss Distance in Price (for Section 12)       |
+//| Returns SL distance in price units based on ATR                   |
+//+------------------------------------------------------------------+
+double CalculateATRStopLoss(int barIndex = 0)
+{
+   double atr = GetATRPriceAtBar(barIndex);
+   return atr * InpATRStopMultiplier;
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Calculate Take Profit 1 Distance in Price (for Section 12)   |
+//+------------------------------------------------------------------+
+double CalculateATRTP1(int barIndex = 0)
+{
+   double atr = GetATRPriceAtBar(barIndex);
+   return atr * InpATRTP1Multiplier;
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Calculate Take Profit 2 Distance in Price (for Section 12)   |
+//+------------------------------------------------------------------+
+double CalculateATRTP2(int barIndex = 0)
+{
+   double atr = GetATRPriceAtBar(barIndex);
+   return atr * InpATRTP2Multiplier;
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Calculate Take Profit 3 Distance in Price (for Section 12)   |
+//+------------------------------------------------------------------+
+double CalculateATRTP3(int barIndex = 0)
+{
+   double atr = GetATRPriceAtBar(barIndex);
+   return atr * InpATRTP3Multiplier;
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Get All TP/SL Levels at Once (for Section 12)                |
+//| Calculates actual price levels from entry price                   |
+//+------------------------------------------------------------------+
+void GetATRBasedLevels(double entryPrice, bool isBuy,
+                       double &slPrice, double &tp1Price,
+                       double &tp2Price, double &tp3Price, int barIndex = 0)
+{
+   double atr = GetATRPriceAtBar(barIndex);
+
+   double slDist = atr * InpATRStopMultiplier;
+   double tp1Dist = atr * InpATRTP1Multiplier;
+   double tp2Dist = atr * InpATRTP2Multiplier;
+   double tp3Dist = atr * InpATRTP3Multiplier;
+
+   if(isBuy)
+   {
+      slPrice = entryPrice - slDist;
+      tp1Price = entryPrice + tp1Dist;
+      tp2Price = entryPrice + tp2Dist;
+      tp3Price = entryPrice + tp3Dist;
+   }
+   else
+   {
+      slPrice = entryPrice + slDist;
+      tp1Price = entryPrice - tp1Dist;
+      tp2Price = entryPrice - tp2Dist;
+      tp3Price = entryPrice - tp3Dist;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Get SL/TP Multipliers (for display/reference)                |
+//+------------------------------------------------------------------+
+double GetSLMultiplier() { return InpATRStopMultiplier; }
+double GetTP1Multiplier() { return InpATRTP1Multiplier; }
+double GetTP2Multiplier() { return InpATRTP2Multiplier; }
+double GetTP3Multiplier() { return InpATRTP3Multiplier; }
+
+//+------------------------------------------------------------------+
+//| NEW: Calculate Risk:Reward Ratio for Each TP Level                |
+//+------------------------------------------------------------------+
+double GetRiskRewardTP1() { return InpATRTP1Multiplier / InpATRStopMultiplier; }
+double GetRiskRewardTP2() { return InpATRTP2Multiplier / InpATRStopMultiplier; }
+double GetRiskRewardTP3() { return InpATRTP3Multiplier / InpATRStopMultiplier; }
+
+//+------------------------------------------------------------------+
+//| NEW: Adjust Position Size Based on Volatility (for Section 11)    |
+//| Returns multiplier: 1.0 = normal, <1 = reduce, >1 = increase      |
+//+------------------------------------------------------------------+
+double GetVolatilityPositionMultiplier()
+{
+   // In extreme volatility, reduce position size
+   if(g_currentResult.condition == MARKET_EXTREME)
+      return 0.5;  // Half size in extreme conditions
+
+   // In high percentile (>80), reduce slightly
+   if(g_atrPercentile > 80.0)
+      return 0.75;
+
+   // In very low volatility/squeeze, can increase slightly
+   if(g_volatilitySqueeze)
+      return 0.8;  // Still cautious during squeeze
+
+   // Normal conditions
+   return 1.0;
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Is Market Suitable for Swing Trading?                        |
+//| Combined check of all volatility conditions                       |
+//+------------------------------------------------------------------+
+bool IsGoodSwingConditions()
+{
+   // Not suitable if market too quiet
+   if(g_currentResult.condition == MARKET_QUIET && !g_volatilitySqueeze)
+      return false;
+
+   // Suitable if normal conditions
+   if(g_currentResult.condition == MARKET_NORMAL)
+      return true;
+
+   // Extreme but within reasonable percentile is OK with caution
+   if(g_currentResult.condition == MARKET_EXTREME && g_atrPercentile < 95.0)
+      return true;
+
+   // Squeeze conditions are good for breakout setups
+   if(g_volatilitySqueeze)
+      return true;
+
+   return false;
 }
 //+------------------------------------------------------------------+
