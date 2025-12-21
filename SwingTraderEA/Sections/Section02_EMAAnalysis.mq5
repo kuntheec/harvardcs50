@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.00"
+#property version   "1.10"
 #property description "Section 2: EMA Analysis"
 #property description "EMA 50/200 for H4 trend bias detection"
 #property description "Includes crossover detection and visual lines"
@@ -71,6 +71,13 @@ string         g_panelName = "EMAAnalysisPanel";  // Panel object prefix
 int            g_digits;
 double         g_point;
 double         g_pipValue;
+double         g_pipSize;
+string         g_instrumentType;
+
+// EMA Slope (momentum strength)
+double         g_emaFastSlope = 0;        // EMA50 slope (% change)
+double         g_emaSlowSlope = 0;        // EMA200 slope (% change)
+bool           g_slopeConfirmed = false;  // Both slopes align with trend
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -81,6 +88,35 @@ int OnInit()
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    g_pipValue = GetPipValue(_Symbol);
+
+   // Auto-detect instrument type and set pip size (same as Section 3)
+   string sym = _Symbol;
+   StringToUpper(sym);
+
+   if(StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0)
+   {
+      g_instrumentType = "GOLD";
+      g_pipSize = 0.10;  // Gold: 1 pip = $0.10
+      Print("AUTO-DETECT: Gold pair - pip size = 0.10");
+   }
+   else if(StringFind(sym, "XAG") >= 0 || StringFind(sym, "SILVER") >= 0)
+   {
+      g_instrumentType = "SILVER";
+      g_pipSize = 0.01;
+      Print("AUTO-DETECT: Silver pair - pip size = 0.01");
+   }
+   else if(StringFind(sym, "JPY") >= 0)
+   {
+      g_instrumentType = "JPY";
+      g_pipSize = g_point * (g_digits == 3 ? 1 : 10);
+      Print("AUTO-DETECT: JPY pair");
+   }
+   else
+   {
+      g_instrumentType = "FOREX";
+      g_pipSize = g_point * (g_digits == 5 ? 10 : 1);
+      Print("AUTO-DETECT: Standard forex pair");
+   }
 
    // Create indicator handles
    g_emaFastHandle = iMA(_Symbol, InpEMATimeframe, InpEMAFastPeriod, 0, MODE_EMA, InpEMAPrice);
@@ -195,7 +231,10 @@ void AnalyzeEMA()
    // Determine trend bias
    DetermineTrendBias();
 
-   // Check for recent crossover
+   // Calculate EMA slopes (momentum strength)
+   CalculateEMASlope();
+
+   // Check for recent crossover (with price confirmation)
    DetectCrossover();
 
    // Print report
@@ -219,9 +258,10 @@ void AnalyzeATR()
    double atrPoints = g_atrBuffer[0];
    double atrPips;
 
-   // Gold-specific conversion
-   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
-      atrPips = atrPoints * 10;
+   // Convert ATR to pips using auto-detected pip size
+   // FIX: Use proper pip size instead of hardcoded *10 for Gold
+   if(g_pipSize > 0)
+      atrPips = atrPoints / g_pipSize;
    else
       atrPips = PointsToPips(_Symbol, atrPoints);
 
@@ -315,7 +355,44 @@ void DetermineTrendBias()
 }
 
 //+------------------------------------------------------------------+
-//| Detect Recent Crossover                                           |
+//| Calculate EMA Slope (momentum strength)                           |
+//| Slope = % change over last 5 bars                                 |
+//+------------------------------------------------------------------+
+void CalculateEMASlope()
+{
+   int slopeBars = 5;  // Calculate slope over 5 bars
+
+   if(ArraySize(g_emaFastBuffer) < slopeBars + 1 ||
+      ArraySize(g_emaSlowBuffer) < slopeBars + 1)
+   {
+      g_emaFastSlope = 0;
+      g_emaSlowSlope = 0;
+      g_slopeConfirmed = false;
+      return;
+   }
+
+   // EMA50 slope: (current - 5 bars ago) / 5 bars ago * 100
+   g_emaFastSlope = (g_emaFastBuffer[0] - g_emaFastBuffer[slopeBars]) /
+                     g_emaFastBuffer[slopeBars] * 100;
+
+   // EMA200 slope: (current - 5 bars ago) / 5 bars ago * 100
+   g_emaSlowSlope = (g_emaSlowBuffer[0] - g_emaSlowBuffer[slopeBars]) /
+                     g_emaSlowBuffer[slopeBars] * 100;
+
+   // Check if slopes confirm trend
+   // Bullish: Both slopes positive
+   // Bearish: Both slopes negative
+   if(g_emaResult.trend == BIAS_BULLISH)
+      g_slopeConfirmed = (g_emaFastSlope > 0 && g_emaSlowSlope > 0);
+   else if(g_emaResult.trend == BIAS_BEARISH)
+      g_slopeConfirmed = (g_emaFastSlope < 0 && g_emaSlowSlope < 0);
+   else
+      g_slopeConfirmed = false;
+}
+
+//+------------------------------------------------------------------+
+//| Detect Recent Crossover with Price Confirmation                   |
+//| IMPROVED: Also checks if price reacted after crossover            |
 //+------------------------------------------------------------------+
 void DetectCrossover()
 {
@@ -343,6 +420,29 @@ void DetectCrossover()
       {
          g_emaResult.recentCrossover = true;
          g_emaResult.candlesSinceCross = i;
+
+         // Check for price confirmation after crossover
+         // Price should move in crossover direction
+         if(i > 0)
+         {
+            double priceAtCross = iClose(_Symbol, InpEMATimeframe, i);
+            double priceNow = iClose(_Symbol, InpEMATimeframe, 0);
+
+            bool priceConfirmed = false;
+            if(bullishCross && priceNow > priceAtCross)
+               priceConfirmed = true;
+            else if(bearishCross && priceNow < priceAtCross)
+               priceConfirmed = true;
+
+            // If crossover is old (5+ bars) and price confirmed, treat as established
+            if(i >= 5 && priceConfirmed)
+            {
+               // Crossover is confirmed, treat trend as established
+               g_emaResult.recentCrossover = false;
+               if(InpPrintReport)
+                  Print("Crossover CONFIRMED: Price reaction validates the ", bullishCross ? "bullish" : "bearish", " cross");
+            }
+         }
          break;
       }
    }
@@ -382,6 +482,12 @@ void PrintEMAReport()
    Print("  EMA ", InpEMASlowPeriod, ": ", DoubleToString(g_emaResult.ema200, g_digits));
    Print("  EMA Gap: ", DoubleToString(emaGap, g_digits),
          " (", DoubleToString(emaGap/g_emaResult.ema200*100, 2), "%)");
+   Print("-------------------------------------------------");
+
+   Print("EMA MOMENTUM (Slope):");
+   Print("  EMA", InpEMAFastPeriod, " Slope: ", DoubleToString(g_emaFastSlope, 4), "% (5 bars)");
+   Print("  EMA", InpEMASlowPeriod, " Slope: ", DoubleToString(g_emaSlowSlope, 4), "% (5 bars)");
+   Print("  Slope Confirms Trend: ", g_slopeConfirmed ? "YES" : "NO");
    Print("-------------------------------------------------");
 
    Print("PRICE POSITION:");
@@ -542,8 +648,8 @@ void CreatePanel()
    int x = InpPanelX;
    int y = InpPanelY;
 
-   // Background
-   CreateRectangle(g_panelName + "_bg", x, y, 300, 240, clrBlack, 200);
+   // Background (increased height for slope row)
+   CreateRectangle(g_panelName + "_bg", x, y, 300, 260, clrBlack, 200);
 
    // Title
    CreateLabel(g_panelName + "_title", x + 10, y + 5,
@@ -595,11 +701,15 @@ void CreatePanel()
    CreateLabel(g_panelName + "_cross_label", x + 10, y + yOffset + 150, "Crossover:", clrWhite, 9, "Arial");
    CreateLabel(g_panelName + "_cross_value", x + 150, y + yOffset + 150, "--", clrGray, 9, "Arial");
 
+   // Slope (momentum)
+   CreateLabel(g_panelName + "_slope_label", x + 10, y + yOffset + 170, "Momentum:", clrWhite, 9, "Arial");
+   CreateLabel(g_panelName + "_slope_value", x + 150, y + yOffset + 170, "--", clrGray, 9, "Arial");
+
    // Recommendation
-   CreateLabel(g_panelName + "_sep4", x + 10, y + yOffset + 170,
+   CreateLabel(g_panelName + "_sep4", x + 10, y + yOffset + 190,
                "--------------------------------", clrGray, 8, "Courier New");
-   CreateLabel(g_panelName + "_rec_label", x + 10, y + yOffset + 185, "Action:", clrWhite, 9, "Arial");
-   CreateLabel(g_panelName + "_rec_value", x + 100, y + yOffset + 185, "WAIT", clrYellow, 9, "Arial Bold");
+   CreateLabel(g_panelName + "_rec_label", x + 10, y + yOffset + 205, "Action:", clrWhite, 9, "Arial");
+   CreateLabel(g_panelName + "_rec_value", x + 100, y + yOffset + 205, "WAIT", clrYellow, 9, "Arial Bold");
 }
 
 //+------------------------------------------------------------------+
@@ -677,6 +787,27 @@ void UpdatePanel()
       ObjectSetInteger(0, g_panelName + "_cross_value", OBJPROP_COLOR, clrLimeGreen);
    }
 
+   // Update slope (momentum)
+   string slopeText = "";
+   color slopeColor = clrGray;
+
+   if(g_slopeConfirmed)
+   {
+      slopeText = "STRONG";
+      slopeColor = (g_emaResult.trend == BIAS_BULLISH) ? clrLimeGreen : clrRed;
+   }
+   else if(g_emaFastSlope != 0 || g_emaSlowSlope != 0)
+   {
+      slopeText = "WEAK";
+      slopeColor = clrYellow;
+   }
+   else
+   {
+      slopeText = "--";
+   }
+   ObjectSetString(0, g_panelName + "_slope_value", OBJPROP_TEXT, slopeText);
+   ObjectSetInteger(0, g_panelName + "_slope_value", OBJPROP_COLOR, slopeColor);
+
    // Update recommendation
    string recText = "";
    color recColor = clrGray;
@@ -708,6 +839,7 @@ void UpdatePanel()
 
 //+------------------------------------------------------------------+
 //| Draw EMA Lines on Chart                                           |
+//| OPTIMIZED: Limits to 100 bars to reduce lag                       |
 //+------------------------------------------------------------------+
 void DrawEMALines()
 {
@@ -723,7 +855,9 @@ void DrawEMALines()
       return;
    }
 
-   int barsToShow = MathMin(InpHistoryBars, MathMin(fastSize, slowSize));
+   // OPTIMIZATION: Limit to 100 bars max to reduce lag (was InpHistoryBars = 300)
+   int maxBarsForLines = 100;
+   int barsToShow = MathMin(maxBarsForLines, MathMin(fastSize, slowSize));
 
    // Remove old lines
    ObjectsDeleteAll(0, "EMA_Line_");
