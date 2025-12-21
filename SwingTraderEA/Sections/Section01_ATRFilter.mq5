@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.12"
+#property version   "1.13"
 #property description "Section 1: ATR Volatility Filter"
 #property description "Tests ATR-based market condition classification"
 #property description "H4 timeframe analysis for market volatility"
@@ -27,12 +27,20 @@ input ENUM_TIMEFRAMES InpATRTimeframe = PERIOD_H4; // ATR Calculation Timeframe
 
 input group "=== Display Settings ==="
 input bool     InpShowPanel           = true;     // Show Info Panel on Chart
+input bool     InpShowAdvancedPanel   = true;     // Show Advanced ATR Section in Panel
 input bool     InpShowATRLine         = true;     // Show ATR History as Line
+input color    InpATRLineColor        = clrDodgerBlue; // ATR Line Color
+input int      InpATRLineWidth        = 2;        // ATR Line Width
+input int      InpATRLineBars         = 100;      // ATR Line Bars to Draw
 input color    InpQuietColor          = clrGray;  // Quiet Market Color
 input color    InpNormalColor         = clrLimeGreen; // Normal Market Color
 input color    InpExtremeColor        = clrRed;   // Extreme Market Color
 input int      InpPanelX              = 20;       // Panel X Position
 input int      InpPanelY              = 30;       // Panel Y Position
+
+input group "=== Alert Settings ==="
+input bool     InpSqueezeAlert        = true;     // Alert on Volatility Squeeze
+input bool     InpExpandAlert         = false;    // Alert on Volatility Expansion
 
 input group "=== Report Settings ==="
 input bool     InpPrintReport         = true;     // Print Report to Experts Tab
@@ -82,6 +90,11 @@ bool           g_volatilitySqueeze;               // Is volatility in squeeze?
 bool           g_volatilityExpanding;             // Is volatility expanding?
 bool           g_volatilityContracting;           // Is volatility contracting?
 string         g_volatilityTrend;                 // "EXPANDING", "CONTRACTING", "STABLE"
+
+// Alert and Line Variables
+bool           g_lastSqueezeState = false;        // For squeeze alert (only alert once)
+bool           g_lastExpandState = false;         // For expansion alert (only alert once)
+string         g_atrLineName = "ATRLine_";        // ATR line object prefix
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -162,6 +175,9 @@ void OnDeinit(const int reason)
    // Remove panel objects
    DeletePanel();
 
+   // Remove ATR line objects
+   DeleteATRLines();
+
    // Print exit report
    Print("=================================================");
    Print("ATR Filter EA Deinitialized");
@@ -188,6 +204,13 @@ void OnTick()
       // Update panel
       if(InpShowPanel)
          UpdatePanel();
+
+      // Draw ATR history line
+      if(InpShowATRLine)
+         DrawATRLine();
+
+      // Check for volatility alerts
+      CheckVolatilityAlerts();
    }
 }
 
@@ -494,8 +517,11 @@ void CreatePanel()
    int x = InpPanelX;
    int y = InpPanelY;
 
-   // Background rectangle (expanded for advanced analysis)
-   CreateRectangle(g_panelName + "_bg", x, y, 300, 290, clrBlack, 200);
+   // Dynamic panel height based on advanced section visibility
+   int panelHeight = InpShowAdvancedPanel ? 290 : 175;
+
+   // Background rectangle
+   CreateRectangle(g_panelName + "_bg", x, y, 300, panelHeight, clrBlack, 200);
 
    // Title
    CreateLabel(g_panelName + "_title", x + 10, y + 5,
@@ -543,46 +569,53 @@ void CreatePanel()
                " | Extreme: >" + DoubleToString(InpATRExtremeThreshold, 0),
                clrGray, 8, "Arial");
 
-   // Separator for Advanced Section
-   CreateLabel(g_panelName + "_sep4", x + 10, y + 165,
-               "----------------------------", clrGray, 8, "Courier New");
+   // Time (position depends on advanced section)
+   int timeY = InpShowAdvancedPanel ? y + 275 : y + 160;
 
-   // Advanced ATR Analysis Section
-   CreateLabel(g_panelName + "_adv_title", x + 10, y + 180,
-               "ADVANCED ATR ANALYSIS", clrCyan, 9, "Arial Bold");
+   // Only show advanced section if enabled
+   if(InpShowAdvancedPanel)
+   {
+      // Separator for Advanced Section
+      CreateLabel(g_panelName + "_sep4", x + 10, y + 165,
+                  "----------------------------", clrGray, 8, "Courier New");
 
-   // ATR vs Average
-   CreateLabel(g_panelName + "_avg_label", x + 10, y + 198,
-               "ATR vs Avg:", clrWhite, 8, "Arial");
-   CreateLabel(g_panelName + "_avg_value", x + 150, y + 198,
-               "-- %", clrYellow, 8, "Arial");
+      // Advanced ATR Analysis Section
+      CreateLabel(g_panelName + "_adv_title", x + 10, y + 180,
+                  "ADVANCED ATR ANALYSIS", clrCyan, 9, "Arial Bold");
 
-   // ATR Percentile
-   CreateLabel(g_panelName + "_pct_label", x + 10, y + 213,
-               "Percentile:", clrWhite, 8, "Arial");
-   CreateLabel(g_panelName + "_pct_value", x + 150, y + 213,
-               "-- %", clrYellow, 8, "Arial");
+      // ATR vs Average
+      CreateLabel(g_panelName + "_avg_label", x + 10, y + 198,
+                  "ATR vs Avg:", clrWhite, 8, "Arial");
+      CreateLabel(g_panelName + "_avg_value", x + 150, y + 198,
+                  "-- %", clrYellow, 8, "Arial");
 
-   // Volatility Trend
-   CreateLabel(g_panelName + "_trend_label", x + 10, y + 228,
-               "Vol Trend:", clrWhite, 8, "Arial");
-   CreateLabel(g_panelName + "_trend_value", x + 150, y + 228,
-               "ANALYZING", clrYellow, 8, "Arial Bold");
+      // ATR Percentile
+      CreateLabel(g_panelName + "_pct_label", x + 10, y + 213,
+                  "Percentile:", clrWhite, 8, "Arial");
+      CreateLabel(g_panelName + "_pct_value", x + 150, y + 213,
+                  "-- %", clrYellow, 8, "Arial");
 
-   // Squeeze Alert
-   CreateLabel(g_panelName + "_squeeze_label", x + 10, y + 243,
-               "Squeeze Alert:", clrWhite, 8, "Arial");
-   CreateLabel(g_panelName + "_squeeze_value", x + 150, y + 243,
-               "--", clrYellow, 8, "Arial");
+      // Volatility Trend
+      CreateLabel(g_panelName + "_trend_label", x + 10, y + 228,
+                  "Vol Trend:", clrWhite, 8, "Arial");
+      CreateLabel(g_panelName + "_trend_value", x + 150, y + 228,
+                  "ANALYZING", clrYellow, 8, "Arial Bold");
 
-   // Swing Conditions
-   CreateLabel(g_panelName + "_swing_label", x + 10, y + 258,
-               "Swing Ready:", clrWhite, 8, "Arial");
-   CreateLabel(g_panelName + "_swing_value", x + 150, y + 258,
-               "--", clrYellow, 8, "Arial Bold");
+      // Squeeze Alert
+      CreateLabel(g_panelName + "_squeeze_label", x + 10, y + 243,
+                  "Squeeze Alert:", clrWhite, 8, "Arial");
+      CreateLabel(g_panelName + "_squeeze_value", x + 150, y + 243,
+                  "--", clrYellow, 8, "Arial");
+
+      // Swing Conditions
+      CreateLabel(g_panelName + "_swing_label", x + 10, y + 258,
+                  "Swing Ready:", clrWhite, 8, "Arial");
+      CreateLabel(g_panelName + "_swing_value", x + 150, y + 258,
+                  "--", clrYellow, 8, "Arial Bold");
+   }
 
    // Time
-   CreateLabel(g_panelName + "_time", x + 10, y + 275,
+   CreateLabel(g_panelName + "_time", x + 10, timeY,
                "Last Update: --", clrGray, 8, "Arial");
 }
 
@@ -627,43 +660,46 @@ void UpdatePanel()
    ObjectSetString(0, g_panelName + "_trade_value", OBJPROP_TEXT, tradeText);
    ObjectSetInteger(0, g_panelName + "_trade_value", OBJPROP_COLOR, tradeColor);
 
-   // Update Advanced ATR Analysis fields
-   // ATR vs Average
-   double atrRatio = (g_atrAverage > 0) ? g_atrBuffer[0] / g_atrAverage * 100.0 : 100.0;
-   ObjectSetString(0, g_panelName + "_avg_value", OBJPROP_TEXT,
-                   DoubleToString(atrRatio, 1) + "%");
-   color ratioColor = (atrRatio > 120) ? clrOrange : (atrRatio < 80) ? clrAqua : clrLimeGreen;
-   ObjectSetInteger(0, g_panelName + "_avg_value", OBJPROP_COLOR, ratioColor);
+   // Update Advanced ATR Analysis fields (only if enabled)
+   if(InpShowAdvancedPanel)
+   {
+      // ATR vs Average
+      double atrRatio = (g_atrAverage > 0) ? g_atrBuffer[0] / g_atrAverage * 100.0 : 100.0;
+      ObjectSetString(0, g_panelName + "_avg_value", OBJPROP_TEXT,
+                      DoubleToString(atrRatio, 1) + "%");
+      color ratioColor = (atrRatio > 120) ? clrOrange : (atrRatio < 80) ? clrAqua : clrLimeGreen;
+      ObjectSetInteger(0, g_panelName + "_avg_value", OBJPROP_COLOR, ratioColor);
 
-   // ATR Percentile
-   ObjectSetString(0, g_panelName + "_pct_value", OBJPROP_TEXT,
-                   DoubleToString(g_atrPercentile, 1) + "%");
-   color pctColor = (g_atrPercentile > 80) ? clrOrange : (g_atrPercentile < 20) ? clrAqua : clrYellow;
-   ObjectSetInteger(0, g_panelName + "_pct_value", OBJPROP_COLOR, pctColor);
+      // ATR Percentile
+      ObjectSetString(0, g_panelName + "_pct_value", OBJPROP_TEXT,
+                      DoubleToString(g_atrPercentile, 1) + "%");
+      color pctColor = (g_atrPercentile > 80) ? clrOrange : (g_atrPercentile < 20) ? clrAqua : clrYellow;
+      ObjectSetInteger(0, g_panelName + "_pct_value", OBJPROP_COLOR, pctColor);
 
-   // Volatility Trend
-   ObjectSetString(0, g_panelName + "_trend_value", OBJPROP_TEXT, g_volatilityTrend);
-   color trendColor = clrYellow;
-   if(g_volatilityTrend == "EXPANDING")
-      trendColor = clrOrange;
-   else if(g_volatilityTrend == "CONTRACTING")
-      trendColor = clrAqua;
-   else
-      trendColor = clrLimeGreen;
-   ObjectSetInteger(0, g_panelName + "_trend_value", OBJPROP_COLOR, trendColor);
+      // Volatility Trend
+      ObjectSetString(0, g_panelName + "_trend_value", OBJPROP_TEXT, g_volatilityTrend);
+      color trendColor = clrYellow;
+      if(g_volatilityTrend == "EXPANDING")
+         trendColor = clrOrange;
+      else if(g_volatilityTrend == "CONTRACTING")
+         trendColor = clrAqua;
+      else
+         trendColor = clrLimeGreen;
+      ObjectSetInteger(0, g_panelName + "_trend_value", OBJPROP_COLOR, trendColor);
 
-   // Squeeze Alert
-   string squeezeText = g_volatilitySqueeze ? "YES - Breakout!" : "NO";
-   color squeezeColor = g_volatilitySqueeze ? clrMagenta : clrGray;
-   ObjectSetString(0, g_panelName + "_squeeze_value", OBJPROP_TEXT, squeezeText);
-   ObjectSetInteger(0, g_panelName + "_squeeze_value", OBJPROP_COLOR, squeezeColor);
+      // Squeeze Alert
+      string squeezeText = g_volatilitySqueeze ? "YES - Breakout!" : "NO";
+      color squeezeColor = g_volatilitySqueeze ? clrMagenta : clrGray;
+      ObjectSetString(0, g_panelName + "_squeeze_value", OBJPROP_TEXT, squeezeText);
+      ObjectSetInteger(0, g_panelName + "_squeeze_value", OBJPROP_COLOR, squeezeColor);
 
-   // Swing Ready
-   bool swingReady = IsGoodSwingConditions();
-   string swingText = swingReady ? "YES" : "NO";
-   color swingColor = swingReady ? clrLimeGreen : clrRed;
-   ObjectSetString(0, g_panelName + "_swing_value", OBJPROP_TEXT, swingText);
-   ObjectSetInteger(0, g_panelName + "_swing_value", OBJPROP_COLOR, swingColor);
+      // Swing Ready
+      bool swingReady = IsGoodSwingConditions();
+      string swingText = swingReady ? "YES" : "NO";
+      color swingColor = swingReady ? clrLimeGreen : clrRed;
+      ObjectSetString(0, g_panelName + "_swing_value", OBJPROP_TEXT, swingText);
+      ObjectSetInteger(0, g_panelName + "_swing_value", OBJPROP_COLOR, swingColor);
+   }
 
    // Update time
    ObjectSetString(0, g_panelName + "_time", OBJPROP_TEXT,
@@ -721,6 +757,88 @@ void CreateLabel(string name, int x, int y, string text, color clr, int fontSize
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+}
+
+//+------------------------------------------------------------------+
+//| Draw ATR History Line on Chart                                    |
+//+------------------------------------------------------------------+
+void DrawATRLine()
+{
+   if(!InpShowATRLine) return;
+
+   // Delete old ATR line objects
+   DeleteATRLines();
+
+   // Ensure we have enough data
+   int barsNeeded = InpATRLineBars;
+   if(ArraySize(g_atrBuffer) < barsNeeded)
+   {
+      int copied = CopyBuffer(g_atrHandle, 0, 0, barsNeeded, g_atrBuffer);
+      if(copied < barsNeeded)
+         barsNeeded = copied;
+   }
+
+   // Draw ATR as trend line segments
+   // ATR is not a price value, so we need to scale it to fit on chart
+   // We'll use a separate window approach - draw as horizontal levels at ATR value
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   for(int i = 0; i < barsNeeded - 1; i++)
+   {
+      datetime time1 = iTime(_Symbol, InpATRTimeframe, i);
+      datetime time2 = iTime(_Symbol, InpATRTimeframe, i + 1);
+
+      // Scale ATR to price range for visual display
+      // ATR line shows relative volatility as offset from low price
+      double lowPrice = iLow(_Symbol, InpATRTimeframe, i);
+      double atrScaled1 = lowPrice - g_atrBuffer[i];  // Display below price
+      double atrScaled2 = iLow(_Symbol, InpATRTimeframe, i + 1) - g_atrBuffer[i + 1];
+
+      string lineName = g_atrLineName + IntegerToString(i);
+      ObjectCreate(0, lineName, OBJ_TREND, 0, time2, atrScaled2, time1, atrScaled1);
+      ObjectSetInteger(0, lineName, OBJPROP_COLOR, InpATRLineColor);
+      ObjectSetInteger(0, lineName, OBJPROP_WIDTH, InpATRLineWidth);
+      ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, lineName, OBJPROP_RAY_LEFT, false);
+      ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, lineName, OBJPROP_HIDDEN, true);
+   }
+
+   ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//| Delete ATR Line Objects                                           |
+//+------------------------------------------------------------------+
+void DeleteATRLines()
+{
+   ObjectsDeleteAll(0, g_atrLineName);
+}
+
+//+------------------------------------------------------------------+
+//| Check and Send Volatility Alerts                                  |
+//+------------------------------------------------------------------+
+void CheckVolatilityAlerts()
+{
+   // Squeeze Alert (only once when squeeze starts)
+   if(InpSqueezeAlert && g_volatilitySqueeze && !g_lastSqueezeState)
+   {
+      string msg = _Symbol + " | VOLATILITY SQUEEZE DETECTED | ATR at " +
+                   DoubleToString(g_atrPercentile, 1) + "% percentile | Breakout may follow";
+      Alert(msg);
+      Print("ALERT: ", msg);
+   }
+   g_lastSqueezeState = g_volatilitySqueeze;
+
+   // Expansion Alert (only once when expansion starts)
+   if(InpExpandAlert && g_volatilityExpanding && !g_lastExpandState)
+   {
+      string msg = _Symbol + " | VOLATILITY EXPANDING | ATR at " +
+                   DoubleToString(g_atrPercentile, 1) + "% percentile | Consider reducing position size";
+      Alert(msg);
+      Print("ALERT: ", msg);
+   }
+   g_lastExpandState = g_volatilityExpanding;
 }
 
 //+------------------------------------------------------------------+
@@ -808,12 +926,8 @@ double GetATRPipsAtBar(int barIndex = 0)
    double atrPrice = GetATRPriceAtBar(barIndex);
    if(atrPrice == 0.0) return 0.0;
 
-   // Convert to pips
-   // Gold: ATR is in dollars, 1 pip = $0.10, so multiply by 10
-   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
-      return atrPrice * 10.0;
-   else
-      return PointsToPips(_Symbol, atrPrice);
+   // Use GetATRPipsFromPrice for consistent conversion
+   return GetATRPipsFromPrice(atrPrice);
 }
 
 //+------------------------------------------------------------------+
@@ -932,9 +1046,12 @@ double GetATRPipsFromPrice(double atrPrice)
 {
    if(atrPrice == 0.0) return 0.0;
 
-   // Gold: ATR is in dollars, 1 pip = $0.10, so multiply by 10
-   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
-      return atrPrice * 10.0;
+   // Use g_pipValue for consistent conversion across all instruments
+   // Gold: g_pipValue=0.10, so ATR/0.10 = pips (e.g., $23.80 / 0.10 = 238 pips)
+   // Silver: g_pipValue=0.01, so ATR/0.01 = pips
+   // Forex: g_pipValue from GetPipValue()
+   if(g_pipValue > 0)
+      return atrPrice / g_pipValue;
    else
       return PointsToPips(_Symbol, atrPrice);
 }
