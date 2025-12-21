@@ -154,6 +154,10 @@ int OnInit()
    // Run initial analysis FIRST (fills buffers)
    AnalyzeEMA();
 
+   // Update panel with initial values (same fix as Section 3/4)
+   if(InpShowPanel)
+      UpdatePanel();
+
    // Draw EMA lines AFTER analysis
    if(InpShowEMALines)
       DrawEMALines();
