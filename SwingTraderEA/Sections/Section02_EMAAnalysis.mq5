@@ -134,6 +134,10 @@ int OnInit()
    if(InpShowEMALines)
       DrawEMALines();
 
+   // Update panel with initial values (FIX: was missing this call)
+   if(InpShowPanel)
+      UpdatePanel();
+
    return(INIT_SUCCEEDED);
 }
 
