@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.00"
+#property version   "1.10"
 
 //+------------------------------------------------------------------+
 //| Enumerations                                                      |
@@ -25,6 +25,22 @@ enum ENUM_TREND_BIAS
    BIAS_BULLISH,           // Bullish trend
    BIAS_BEARISH,           // Bearish trend
    BIAS_NEUTRAL            // No clear trend / Mixed signals
+};
+
+// Slope Direction (for EMA momentum analysis)
+enum ENUM_SLOPE_DIRECTION
+{
+   SLOPE_RISING,           // Slope is positive (rising)
+   SLOPE_FALLING,          // Slope is negative (falling)
+   SLOPE_FLAT              // Slope is near zero (flat)
+};
+
+// Crossover Type
+enum ENUM_CROSSOVER_TYPE
+{
+   CROSS_NONE,             // No recent crossover
+   CROSS_BULLISH,          // Golden Cross (fast above slow)
+   CROSS_BEARISH           // Death Cross (fast below slow)
 };
 
 // Structure Type (BOS/CHoCH)
@@ -88,10 +104,25 @@ enum ENUM_TF_LEVEL
 //| Structures                                                        |
 //+------------------------------------------------------------------+
 
+// Symbol Info Cache (for proper pip/point calculations)
+struct SymbolInfoCache
+{
+   string            symbol;             // Symbol name
+   int               digits;             // Symbol digits
+   double            point;              // Symbol point value
+   double            pipSize;            // Pip size (0.10 for Gold, 0.0001 for Forex)
+   double            tickSize;           // Minimum tick size
+   double            tickValue;          // Value of one tick
+   bool              isGold;             // Is Gold/XAU pair
+   bool              isSilver;           // Is Silver/XAG pair
+   bool              isJPY;              // Is JPY pair
+};
+
 // ATR Filter Result
 struct ATRFilterResult
 {
    double            atrValue;           // ATR(14) value in pips
+   double            atrPoints;          // ATR raw value in points
    ENUM_MARKET_CONDITION condition;      // Market condition
    bool              tradingAllowed;     // Can we trade?
    string            reason;             // Explanation
@@ -103,10 +134,27 @@ struct EMAAnalysisResult
 {
    double            ema50;              // EMA 50 value
    double            ema200;             // EMA 200 value
+   double            emaGap;             // EMA50 - EMA200
+   double            emaGapPercent;      // Gap as percentage
    ENUM_TREND_BIAS   trend;              // Current trend
-   bool              recentCrossover;    // Crossed within 10 candles?
+   bool              priceAboveEMA50;    // Is price above EMA50?
+   bool              priceAboveEMA200;   // Is price above EMA200?
+
+   // Slope analysis
+   double            ema50Slope;         // EMA50 slope percentage
+   double            ema200Slope;        // EMA200 slope percentage
+   ENUM_SLOPE_DIRECTION ema50SlopeDir;   // EMA50 slope direction
+   ENUM_SLOPE_DIRECTION ema200SlopeDir;  // EMA200 slope direction
+   double            slopeStrength;      // Combined slope strength
+
+   // Crossover analysis
+   bool              recentCrossover;    // Crossed within lookback candles?
+   ENUM_CROSSOVER_TYPE crossoverType;    // Type of crossover
    int               candlesSinceCross;  // Candles since last cross
+   bool              crossoverConfirmed; // Price action confirms crossover?
+
    datetime          timestamp;
+   bool              isValid;            // Is data valid?
 };
 
 // Swing Point
@@ -437,5 +485,95 @@ string SignalStrengthToString(ENUM_SIGNAL_STRENGTH strength)
       case SIGNAL_STRONG:   return "STRONG";
       default:              return "Unknown";
    }
+}
+
+string SlopeDirectionToString(ENUM_SLOPE_DIRECTION slope)
+{
+   switch(slope)
+   {
+      case SLOPE_RISING:  return "RISING";
+      case SLOPE_FALLING: return "FALLING";
+      case SLOPE_FLAT:    return "FLAT";
+      default:            return "Unknown";
+   }
+}
+
+string CrossoverTypeToString(ENUM_CROSSOVER_TYPE cross)
+{
+   switch(cross)
+   {
+      case CROSS_NONE:    return "NONE";
+      case CROSS_BULLISH: return "GOLDEN CROSS";
+      case CROSS_BEARISH: return "DEATH CROSS";
+      default:            return "Unknown";
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Initialize Symbol Info Cache                                      |
+//| Properly detects Gold/Silver/JPY and sets pip size                |
+//+------------------------------------------------------------------+
+void InitSymbolInfo(SymbolInfoCache &info, string symbol)
+{
+   info.symbol = symbol;
+   info.digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   info.point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   info.tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+   info.tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+
+   // Convert symbol to uppercase for comparison
+   string sym = symbol;
+   StringToUpper(sym);
+
+   // Detect Gold (XAU)
+   info.isGold = (StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0);
+
+   // Detect Silver (XAG)
+   info.isSilver = (StringFind(sym, "XAG") >= 0 || StringFind(sym, "SILVER") >= 0);
+
+   // Detect JPY pairs
+   info.isJPY = (StringFind(sym, "JPY") >= 0);
+
+   // Set pip size based on instrument type
+   if(info.isGold)
+   {
+      info.pipSize = 0.10;  // Gold: 1 pip = $0.10
+   }
+   else if(info.isSilver)
+   {
+      info.pipSize = 0.01;  // Silver: 1 pip = $0.01
+   }
+   else if(info.isJPY)
+   {
+      // JPY pairs: 2 or 3 digits
+      info.pipSize = (info.digits == 3) ? 0.01 : 0.01;
+   }
+   else
+   {
+      // Standard Forex: 4 or 5 digits
+      info.pipSize = (info.digits == 5) ? 0.0001 : 0.0001;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Convert Points to Pips using SymbolInfoCache                      |
+//+------------------------------------------------------------------+
+double PointsToPips(const SymbolInfoCache &info, double points)
+{
+   if(info.pipSize > 0)
+      return points / info.pipSize;
+   else
+      return points / info.point;
+}
+
+//+------------------------------------------------------------------+
+//| Convert Pips to Points using SymbolInfoCache                      |
+//+------------------------------------------------------------------+
+double PipsToPoints(const SymbolInfoCache &info, double pips)
+{
+   if(info.pipSize > 0)
+      return pips * info.pipSize;
+   else
+      return pips * info.point;
 }
 //+------------------------------------------------------------------+
