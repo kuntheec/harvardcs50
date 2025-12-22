@@ -1,14 +1,15 @@
 //+------------------------------------------------------------------+
 //|                                        Section05_Fibonacci.mq5   |
 //|                                      SwingTrader Pro EA          |
-//|                  Section 5: Fibonacci Retracement & Fan          |
+//|                  Section 5: Fibonacci Retracement & OTE Zone     |
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.00"
-#property description "Section 5: Fibonacci Retracement & Fan"
+#property version   "2.00"
+#property description "Section 5: Fibonacci Retracement with OTE Zone"
 #property description "Auto-draws Fibonacci levels from swing points"
-#property description "Key levels: 23.6%, 38.2%, 50%, 61.8%, 78.6%"
+#property description "ICT/SMC: OTE Zone (61.8-78.6%) highlighted"
+#property description "Level mitigation tracking for fresh vs touched levels"
 
 //+------------------------------------------------------------------+
 //| Include Files                                                     |
@@ -21,9 +22,10 @@
 input group "=== Fibonacci Settings ==="
 input int      InpFibLookback         = 100;      // Lookback for Swing Detection (candles)
 input int      InpSwingStrength       = 5;        // Swing Strength (bars each side)
+input double   InpMinSwingATRMult     = 1.5;      // Min Swing Size (ATR multiplier)
 input bool     InpShowRetracement     = true;     // Show Retracement Levels
 input bool     InpShowExtension       = true;     // Show Extension Levels
-input bool     InpShowFibFan          = false;    // Show Fibonacci Fan
+input bool     InpShowOTEZone         = true;     // Show OTE Zone (61.8-78.6%)
 input ENUM_TIMEFRAMES InpFibTimeframe = PERIOD_H4; // Fibonacci Timeframe
 
 input group "=== Retracement Levels ==="
@@ -32,12 +34,19 @@ input bool     InpShow382             = true;     // Show 38.2% Level
 input bool     InpShow500             = true;     // Show 50.0% Level
 input bool     InpShow618             = true;     // Show 61.8% Level (Golden Ratio)
 input bool     InpShow786             = true;     // Show 78.6% Level
+input bool     InpShow886             = true;     // Show 88.6% Level (Deep Retrace)
 
 input group "=== Extension Levels ==="
+input bool     InpShow1130            = false;    // Show 113.0% Level
 input bool     InpShow1272            = true;     // Show 127.2% Level
 input bool     InpShow1618            = true;     // Show 161.8% Level
 input bool     InpShow2000            = false;    // Show 200.0% Level
 input bool     InpShow2618            = false;    // Show 261.8% Level
+
+input group "=== Level Mitigation ==="
+input bool     InpUseMitigation       = true;     // Track Level Mitigation
+input bool     InpRemoveMitigated     = false;    // Remove Mitigated Levels (vs gray out)
+input double   InpMitigationBuffer    = 0.5;      // Mitigation Buffer (ATR multiplier)
 
 input group "=== EMA Settings (from Section 2) ==="
 input bool     InpUseEMAFilter        = true;     // Use EMA for Fib Direction
@@ -54,9 +63,11 @@ input group "=== Display Settings ==="
 input bool     InpShowPanel           = true;     // Show Info Panel
 input color    InpFibColor            = clrGold;  // Fibonacci Lines Color
 input color    InpFib618Color         = clrOrange; // 61.8% Level Color (highlight)
+input color    InpOTEZoneColor        = clrDarkOrange; // OTE Zone Color
 input color    InpExtensionColor      = clrLimeGreen; // Extension Levels Color
-input color    InpFanColor            = clrDodgerBlue; // Fan Lines Color
+input color    InpMitigatedColor      = clrDimGray; // Mitigated Level Color
 input int      InpFibLineWidth        = 1;        // Line Width
+input int      InpOTEZoneOpacity      = 30;       // OTE Zone Opacity (0-100)
 input int      InpPanelX              = 20;       // Panel X Position
 input int      InpPanelY              = 30;       // Panel Y Position
 
@@ -64,8 +75,25 @@ input group "=== Report Settings ==="
 input bool     InpPrintReport         = true;     // Print Report to Experts Tab
 
 //+------------------------------------------------------------------+
+//| Fib Level Structure with Mitigation Tracking                     |
+//+------------------------------------------------------------------+
+struct FibLevelInfo
+{
+   double      ratio;              // Fib ratio (0.236, 0.382, etc.)
+   double      price;              // Price at this level
+   string      label;              // Display label
+   bool        isRetracement;      // true = retrace, false = extension
+   bool        isMitigated;        // Has price touched this level?
+   datetime    mitigationTime;     // When was it mitigated?
+   bool        isOTE;              // Is part of OTE zone (61.8-78.6)?
+};
+
+//+------------------------------------------------------------------+
 //| Global Variables                                                  |
 //+------------------------------------------------------------------+
+// Symbol info cache
+SymbolInfoCache g_symbolInfo;
+
 // Indicator handles
 int            g_emaFastHandle;
 int            g_emaSlowHandle;
@@ -90,10 +118,18 @@ int            g_fibSwingLowBar;
 ENUM_TREND_BIAS g_fibDirection;
 bool           g_fibValid = false;
 
-// Fibonacci levels
-double         g_fibLevels[];
-string         g_fibLabels[];
+// Fibonacci levels with mitigation
+FibLevelInfo   g_fibLevels[];
 int            g_fibLevelCount = 0;
+
+// OTE Zone prices
+double         g_oteUpperPrice;
+double         g_oteLowerPrice;
+bool           g_priceInOTE = false;
+
+// ATR value
+double         g_currentATR = 0;
+double         g_currentATRPips = 0;
 
 // Results from previous sections
 EMAAnalysisResult g_emaResult;
@@ -102,28 +138,34 @@ ATRFilterResult   g_atrResult;
 // Panel
 string         g_panelName = "FibPanel";
 
-// Symbol info
-int            g_digits;
-double         g_point;
+// Performance tracking
+datetime       g_lastFibUpdate = 0;
+bool           g_fibNeedsRedraw = true;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // Get symbol info
-   g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   // Initialize symbol info cache (auto-detects Gold/Silver/JPY)
+   InitSymbolInfo(g_symbolInfo, _Symbol);
+
+   // Print symbol detection
+   string typeStr = "FOREX";
+   if(g_symbolInfo.isGold) typeStr = "GOLD/XAU";
+   else if(g_symbolInfo.isSilver) typeStr = "SILVER/XAG";
+   else if(g_symbolInfo.isJPY) typeStr = "JPY PAIR";
+
+   Print("Symbol Detection: ", _Symbol, " | Type: ", typeStr,
+         " | Digits: ", g_symbolInfo.digits,
+         " | PipSize: ", DoubleToString(g_symbolInfo.pipSize, 5));
 
    // Initialize arrays
+   ArrayResize(g_fibLevels, 15);  // Max 15 levels
    ArraySetAsSeries(g_highBuffer, true);
    ArraySetAsSeries(g_lowBuffer, true);
    ArraySetAsSeries(g_closeBuffer, true);
    ArraySetAsSeries(g_timeBuffer, true);
-
-   // Initialize Fib levels array (max 12 levels)
-   ArrayResize(g_fibLevels, 12);
-   ArrayResize(g_fibLabels, 12);
 
    // Create EMA handles if filter enabled
    if(InpUseEMAFilter)
@@ -140,17 +182,14 @@ int OnInit()
       ArraySetAsSeries(g_emaSlowBuffer, true);
    }
 
-   // Create ATR handle if filter enabled
-   if(InpUseATRFilter)
+   // Create ATR handle (always needed for swing validation)
+   g_atrHandle = iATR(_Symbol, InpFibTimeframe, InpATRPeriod);
+   if(g_atrHandle == INVALID_HANDLE)
    {
-      g_atrHandle = iATR(_Symbol, InpFibTimeframe, InpATRPeriod);
-      if(g_atrHandle == INVALID_HANDLE)
-      {
-         Print("ERROR: Failed to create ATR handle");
-         return(INIT_FAILED);
-      }
-      ArraySetAsSeries(g_atrBuffer, true);
+      Print("ERROR: Failed to create ATR handle");
+      return(INIT_FAILED);
    }
+   ArraySetAsSeries(g_atrBuffer, true);
 
    // Print initialization
    PrintInitReport();
@@ -161,6 +200,10 @@ int OnInit()
 
    // Run initial analysis
    AnalyzeFibonacci();
+
+   // Update panel with initial values
+   if(InpShowPanel)
+      UpdatePanel();
 
    return(INIT_SUCCEEDED);
 }
@@ -177,10 +220,10 @@ void OnDeinit(const int reason)
 
    // Remove visual objects
    DeletePanel();
-   ObjectsDeleteAll(0, "Fib_");
+   CleanupFibObjects();
 
    Print("=================================================");
-   Print("Fibonacci EA Deinitialized");
+   Print("Fibonacci EA v2.00 Deinitialized");
    Print("=================================================");
 }
 
@@ -192,12 +235,19 @@ void OnTick()
    static datetime lastBarTime = 0;
    datetime currentBarTime = iTime(_Symbol, InpFibTimeframe, 0);
 
+   // Check for new bar
    if(currentBarTime != lastBarTime)
    {
       lastBarTime = currentBarTime;
+      g_fibNeedsRedraw = true;
       AnalyzeFibonacci();
 
       if(InpShowPanel) UpdatePanel();
+   }
+   else if(InpUseMitigation)
+   {
+      // Check mitigation on every tick
+      CheckLevelMitigation();
    }
 }
 
@@ -214,9 +264,8 @@ void AnalyzeFibonacci()
    if(CopyClose(_Symbol, InpFibTimeframe, 0, barsNeeded, g_closeBuffer) < barsNeeded) return;
    if(CopyTime(_Symbol, InpFibTimeframe, 0, barsNeeded, g_timeBuffer) < barsNeeded) return;
 
-   // Analyze ATR if enabled
-   if(InpUseATRFilter)
-      AnalyzeATR();
+   // Get ATR (always needed for swing validation)
+   AnalyzeATR();
 
    // Analyze EMA if enabled
    if(InpUseEMAFilter)
@@ -229,7 +278,17 @@ void AnalyzeFibonacci()
    if(g_fibValid)
    {
       CalculateFibLevels();
-      DrawFibonacci();
+
+      // Check initial mitigation status
+      if(InpUseMitigation)
+         CheckLevelMitigation();
+
+      // Draw Fibonacci levels
+      if(g_fibNeedsRedraw)
+      {
+         DrawFibonacci();
+         g_fibNeedsRedraw = false;
+      }
    }
 
    // Print report
@@ -238,37 +297,39 @@ void AnalyzeFibonacci()
 }
 
 //+------------------------------------------------------------------+
-//| Analyze ATR                                                       |
+//| Analyze ATR with proper symbol detection                         |
 //+------------------------------------------------------------------+
 void AnalyzeATR()
 {
    if(CopyBuffer(g_atrHandle, 0, 0, 1, g_atrBuffer) < 1) return;
 
    double atrPoints = g_atrBuffer[0];
-   double atrPips;
+   g_currentATR = atrPoints;
 
-   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
-      atrPips = atrPoints * 10;
-   else
-      atrPips = PointsToPips(_Symbol, atrPoints);
+   // Convert to pips using SymbolInfoCache
+   g_currentATRPips = PointsToPips(g_symbolInfo, atrPoints);
 
-   g_atrResult.atrValue = atrPips;
+   g_atrResult.atrValue = g_currentATRPips;
+   g_atrResult.atrPoints = atrPoints;
    g_atrResult.timestamp = TimeCurrent();
 
-   if(atrPips < InpATRQuietThreshold)
+   if(g_currentATRPips < InpATRQuietThreshold)
    {
       g_atrResult.condition = MARKET_QUIET;
       g_atrResult.tradingAllowed = false;
+      g_atrResult.reason = "Market too quiet - skip trading";
    }
-   else if(atrPips > InpATRExtremeThreshold)
+   else if(g_currentATRPips > InpATRExtremeThreshold)
    {
       g_atrResult.condition = MARKET_EXTREME;
       g_atrResult.tradingAllowed = true;
+      g_atrResult.reason = "Extreme volatility - reduce position size";
    }
    else
    {
       g_atrResult.condition = MARKET_NORMAL;
       g_atrResult.tradingAllowed = true;
+      g_atrResult.reason = "Normal conditions - proceed";
    }
 }
 
@@ -284,6 +345,10 @@ void AnalyzeEMA()
    g_emaResult.ema200 = g_emaSlowBuffer[0];
    g_emaResult.timestamp = TimeCurrent();
 
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   g_emaResult.priceAboveEMA50 = currentPrice > g_emaResult.ema50;
+   g_emaResult.priceAboveEMA200 = currentPrice > g_emaResult.ema200;
+
    if(g_emaFastBuffer[0] > g_emaSlowBuffer[0])
       g_emaResult.trend = BIAS_BULLISH;
    else if(g_emaFastBuffer[0] < g_emaSlowBuffer[0])
@@ -293,7 +358,7 @@ void AnalyzeEMA()
 }
 
 //+------------------------------------------------------------------+
-//| Find Swing Points for Fibonacci                                   |
+//| Find Swing Points for Fibonacci with ATR validation              |
 //+------------------------------------------------------------------+
 void FindFibonacciSwings()
 {
@@ -304,6 +369,9 @@ void FindFibonacciSwings()
    double lowestLow = DBL_MAX;
    int highestBar = -1;
    int lowestBar = -1;
+
+   // Minimum swing size based on ATR
+   double minSwingSize = g_currentATR * InpMinSwingATRMult;
 
    // Scan for swing highs and lows
    for(int i = InpSwingStrength; i < InpFibLookback - InpSwingStrength; i++)
@@ -332,7 +400,18 @@ void FindFibonacciSwings()
    // Validate swing points found
    if(highestBar == -1 || lowestBar == -1)
    {
-      Print("Fibonacci: Could not find valid swing points");
+      if(InpPrintReport)
+         Print("Fibonacci: Could not find valid swing points");
+      return;
+   }
+
+   // Validate minimum swing size
+   double swingRange = highestHigh - lowestLow;
+   if(swingRange < minSwingSize)
+   {
+      if(InpPrintReport)
+         Print("Fibonacci: Swing too small (", DoubleToString(swingRange, g_symbolInfo.digits),
+               " < ", DoubleToString(minSwingSize, g_symbolInfo.digits), " ATR req)");
       return;
    }
 
@@ -344,26 +423,18 @@ void FindFibonacciSwings()
    g_fibSwingHighTime = g_timeBuffer[highestBar];
    g_fibSwingLowTime = g_timeBuffer[lowestBar];
 
-   // Determine Fibonacci direction based on which swing is more recent
-   // and EMA trend
+   // Determine Fibonacci direction based on EMA or swing timing
    if(InpUseEMAFilter)
    {
-      // Use EMA to determine direction
       g_fibDirection = g_emaResult.trend;
    }
    else
    {
-      // Use swing point timing - more recent swing determines direction
+      // More recent swing determines direction
       if(highestBar < lowestBar)
-      {
-         // High is more recent - bearish retracement (price went up then pulling back)
-         g_fibDirection = BIAS_BEARISH;
-      }
+         g_fibDirection = BIAS_BEARISH;  // High is more recent - bearish retracement
       else
-      {
-         // Low is more recent - bullish retracement (price went down then bouncing)
-         g_fibDirection = BIAS_BULLISH;
-      }
+         g_fibDirection = BIAS_BULLISH;  // Low is more recent - bullish retracement
    }
 
    g_fibValid = true;
@@ -408,87 +479,155 @@ bool IsSwingLow(int index)
 }
 
 //+------------------------------------------------------------------+
-//| Calculate Fibonacci Levels                                        |
+//| Calculate Fibonacci Levels with OTE Zone                         |
 //+------------------------------------------------------------------+
 void CalculateFibLevels()
 {
    g_fibLevelCount = 0;
    double range = g_fibSwingHigh - g_fibSwingLow;
 
+   // Reset OTE zone
+   g_oteUpperPrice = 0;
+   g_oteLowerPrice = 0;
+
    if(g_fibDirection == BIAS_BULLISH)
    {
       // Bullish: Draw from low to high
       // Retracement levels are below current price
-      // Extension levels are above swing high
 
-      // Add 0% (swing low)
-      AddFibLevel(g_fibSwingLow, "0.0%");
+      // 0% (swing low)
+      AddFibLevel(0.0, g_fibSwingLow, "0.0%", true, false);
 
       // Retracement levels
       if(InpShowRetracement)
       {
-         if(InpShow236) AddFibLevel(g_fibSwingHigh - range * 0.236, "23.6%");
-         if(InpShow382) AddFibLevel(g_fibSwingHigh - range * 0.382, "38.2%");
-         if(InpShow500) AddFibLevel(g_fibSwingHigh - range * 0.500, "50.0%");
-         if(InpShow618) AddFibLevel(g_fibSwingHigh - range * 0.618, "61.8%");
-         if(InpShow786) AddFibLevel(g_fibSwingHigh - range * 0.786, "78.6%");
+         if(InpShow236) AddFibLevel(0.236, g_fibSwingHigh - range * 0.236, "23.6%", true, false);
+         if(InpShow382) AddFibLevel(0.382, g_fibSwingHigh - range * 0.382, "38.2%", true, false);
+         if(InpShow500) AddFibLevel(0.500, g_fibSwingHigh - range * 0.500, "50.0%", true, false);
+         if(InpShow618) AddFibLevel(0.618, g_fibSwingHigh - range * 0.618, "61.8%", true, true);  // OTE
+         if(InpShow786) AddFibLevel(0.786, g_fibSwingHigh - range * 0.786, "78.6%", true, true);  // OTE
+         if(InpShow886) AddFibLevel(0.886, g_fibSwingHigh - range * 0.886, "88.6%", true, false);
       }
 
-      // Add 100% (swing high)
-      AddFibLevel(g_fibSwingHigh, "100%");
+      // 100% (swing high)
+      AddFibLevel(1.0, g_fibSwingHigh, "100%", true, false);
 
       // Extension levels
       if(InpShowExtension)
       {
-         if(InpShow1272) AddFibLevel(g_fibSwingLow + range * 1.272, "127.2%");
-         if(InpShow1618) AddFibLevel(g_fibSwingLow + range * 1.618, "161.8%");
-         if(InpShow2000) AddFibLevel(g_fibSwingLow + range * 2.000, "200%");
-         if(InpShow2618) AddFibLevel(g_fibSwingLow + range * 2.618, "261.8%");
+         if(InpShow1130) AddFibLevel(1.130, g_fibSwingLow + range * 1.130, "113%", false, false);
+         if(InpShow1272) AddFibLevel(1.272, g_fibSwingLow + range * 1.272, "127.2%", false, false);
+         if(InpShow1618) AddFibLevel(1.618, g_fibSwingLow + range * 1.618, "161.8%", false, false);
+         if(InpShow2000) AddFibLevel(2.000, g_fibSwingLow + range * 2.000, "200%", false, false);
+         if(InpShow2618) AddFibLevel(2.618, g_fibSwingLow + range * 2.618, "261.8%", false, false);
       }
+
+      // Calculate OTE zone (61.8% - 78.6%)
+      g_oteUpperPrice = g_fibSwingHigh - range * 0.618;
+      g_oteLowerPrice = g_fibSwingHigh - range * 0.786;
    }
    else // BEARISH
    {
       // Bearish: Draw from high to low
       // Retracement levels are above current price
-      // Extension levels are below swing low
 
-      // Add 0% (swing high)
-      AddFibLevel(g_fibSwingHigh, "0.0%");
+      // 0% (swing high)
+      AddFibLevel(0.0, g_fibSwingHigh, "0.0%", true, false);
 
       // Retracement levels
       if(InpShowRetracement)
       {
-         if(InpShow236) AddFibLevel(g_fibSwingLow + range * 0.236, "23.6%");
-         if(InpShow382) AddFibLevel(g_fibSwingLow + range * 0.382, "38.2%");
-         if(InpShow500) AddFibLevel(g_fibSwingLow + range * 0.500, "50.0%");
-         if(InpShow618) AddFibLevel(g_fibSwingLow + range * 0.618, "61.8%");
-         if(InpShow786) AddFibLevel(g_fibSwingLow + range * 0.786, "78.6%");
+         if(InpShow236) AddFibLevel(0.236, g_fibSwingLow + range * 0.236, "23.6%", true, false);
+         if(InpShow382) AddFibLevel(0.382, g_fibSwingLow + range * 0.382, "38.2%", true, false);
+         if(InpShow500) AddFibLevel(0.500, g_fibSwingLow + range * 0.500, "50.0%", true, false);
+         if(InpShow618) AddFibLevel(0.618, g_fibSwingLow + range * 0.618, "61.8%", true, true);  // OTE
+         if(InpShow786) AddFibLevel(0.786, g_fibSwingLow + range * 0.786, "78.6%", true, true);  // OTE
+         if(InpShow886) AddFibLevel(0.886, g_fibSwingLow + range * 0.886, "88.6%", true, false);
       }
 
-      // Add 100% (swing low)
-      AddFibLevel(g_fibSwingLow, "100%");
+      // 100% (swing low)
+      AddFibLevel(1.0, g_fibSwingLow, "100%", true, false);
 
       // Extension levels
       if(InpShowExtension)
       {
-         if(InpShow1272) AddFibLevel(g_fibSwingHigh - range * 1.272, "127.2%");
-         if(InpShow1618) AddFibLevel(g_fibSwingHigh - range * 1.618, "161.8%");
-         if(InpShow2000) AddFibLevel(g_fibSwingHigh - range * 2.000, "200%");
-         if(InpShow2618) AddFibLevel(g_fibSwingHigh - range * 2.618, "261.8%");
+         if(InpShow1130) AddFibLevel(1.130, g_fibSwingHigh - range * 1.130, "113%", false, false);
+         if(InpShow1272) AddFibLevel(1.272, g_fibSwingHigh - range * 1.272, "127.2%", false, false);
+         if(InpShow1618) AddFibLevel(1.618, g_fibSwingHigh - range * 1.618, "161.8%", false, false);
+         if(InpShow2000) AddFibLevel(2.000, g_fibSwingHigh - range * 2.000, "200%", false, false);
+         if(InpShow2618) AddFibLevel(2.618, g_fibSwingHigh - range * 2.618, "261.8%", false, false);
       }
+
+      // Calculate OTE zone (61.8% - 78.6%)
+      g_oteLowerPrice = g_fibSwingLow + range * 0.618;
+      g_oteUpperPrice = g_fibSwingLow + range * 0.786;
    }
 }
 
 //+------------------------------------------------------------------+
 //| Add Fibonacci Level                                               |
 //+------------------------------------------------------------------+
-void AddFibLevel(double price, string label)
+void AddFibLevel(double ratio, double price, string label, bool isRetrace, bool isOTE)
 {
-   if(g_fibLevelCount < 12)
+   if(g_fibLevelCount < 15)
    {
-      g_fibLevels[g_fibLevelCount] = price;
-      g_fibLabels[g_fibLevelCount] = label;
+      g_fibLevels[g_fibLevelCount].ratio = ratio;
+      g_fibLevels[g_fibLevelCount].price = price;
+      g_fibLevels[g_fibLevelCount].label = label;
+      g_fibLevels[g_fibLevelCount].isRetracement = isRetrace;
+      g_fibLevels[g_fibLevelCount].isMitigated = false;
+      g_fibLevels[g_fibLevelCount].mitigationTime = 0;
+      g_fibLevels[g_fibLevelCount].isOTE = isOTE;
       g_fibLevelCount++;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check Level Mitigation                                            |
+//+------------------------------------------------------------------+
+void CheckLevelMitigation()
+{
+   if(!InpUseMitigation || !g_fibValid)
+      return;
+
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double buffer = g_currentATR * InpMitigationBuffer;
+   bool needsRedraw = false;
+
+   for(int i = 0; i < g_fibLevelCount; i++)
+   {
+      if(g_fibLevels[i].isMitigated)
+         continue;
+
+      // Check if price has touched/crossed this level
+      double levelPrice = g_fibLevels[i].price;
+
+      if(MathAbs(currentPrice - levelPrice) <= buffer)
+      {
+         g_fibLevels[i].isMitigated = true;
+         g_fibLevels[i].mitigationTime = TimeCurrent();
+         needsRedraw = true;
+
+         if(InpPrintReport)
+            Print("Level Mitigated: ", g_fibLevels[i].label, " at ",
+                  DoubleToString(levelPrice, g_symbolInfo.digits));
+      }
+   }
+
+   // Check if price is in OTE zone
+   if(g_oteUpperPrice > 0 && g_oteLowerPrice > 0)
+   {
+      bool wasInOTE = g_priceInOTE;
+      g_priceInOTE = (currentPrice >= g_oteLowerPrice && currentPrice <= g_oteUpperPrice);
+
+      if(g_priceInOTE && !wasInOTE && InpPrintReport)
+         Print(">>> PRICE ENTERED OTE ZONE (61.8-78.6%) <<<");
+   }
+
+   if(needsRedraw)
+   {
+      g_fibNeedsRedraw = true;
+      DrawFibonacci();
    }
 }
 
@@ -498,44 +637,65 @@ void AddFibLevel(double price, string label)
 void DrawFibonacci()
 {
    // Remove old Fib objects
-   ObjectsDeleteAll(0, "Fib_");
+   CleanupFibObjects();
 
    if(!g_fibValid) return;
 
    datetime startTime = (g_fibDirection == BIAS_BULLISH) ? g_fibSwingLowTime : g_fibSwingHighTime;
    datetime endTime = TimeCurrent() + PeriodSeconds(InpFibTimeframe) * 20;
 
+   // Draw OTE Zone Rectangle first (so it's behind lines)
+   if(InpShowOTEZone && g_oteUpperPrice > 0 && g_oteLowerPrice > 0)
+   {
+      DrawOTEZone(startTime, endTime);
+   }
+
    // Draw Fibonacci levels
    for(int i = 0; i < g_fibLevelCount; i++)
    {
+      // Skip mitigated levels if removal is enabled
+      if(InpRemoveMitigated && g_fibLevels[i].isMitigated)
+         continue;
+
       string lineName = "Fib_Level_" + IntegerToString(i);
       string labelName = "Fib_Label_" + IntegerToString(i);
 
-      // Determine color
-      color lineColor = InpFibColor;
-      if(StringFind(g_fibLabels[i], "61.8") >= 0)
-         lineColor = InpFib618Color;
-      else if(StringFind(g_fibLabels[i], "127") >= 0 ||
-              StringFind(g_fibLabels[i], "161") >= 0 ||
-              StringFind(g_fibLabels[i], "200") >= 0 ||
-              StringFind(g_fibLabels[i], "261") >= 0)
-         lineColor = InpExtensionColor;
+      // Determine color based on level type and mitigation status
+      color lineColor = GetLevelColor(i);
+      int lineWidth = InpFibLineWidth;
+      ENUM_LINE_STYLE lineStyle = STYLE_SOLID;
+
+      // Highlight OTE levels
+      if(g_fibLevels[i].isOTE && !g_fibLevels[i].isMitigated)
+      {
+         lineWidth = InpFibLineWidth + 1;
+      }
+
+      // Mitigated levels are dashed
+      if(g_fibLevels[i].isMitigated)
+      {
+         lineStyle = STYLE_DOT;
+         lineColor = InpMitigatedColor;
+      }
 
       // Draw horizontal line
-      ObjectCreate(0, lineName, OBJ_TREND, 0, startTime, g_fibLevels[i], endTime, g_fibLevels[i]);
+      ObjectCreate(0, lineName, OBJ_TREND, 0, startTime, g_fibLevels[i].price, endTime, g_fibLevels[i].price);
       ObjectSetInteger(0, lineName, OBJPROP_COLOR, lineColor);
-      ObjectSetInteger(0, lineName, OBJPROP_WIDTH, InpFibLineWidth);
+      ObjectSetInteger(0, lineName, OBJPROP_WIDTH, lineWidth);
+      ObjectSetInteger(0, lineName, OBJPROP_STYLE, lineStyle);
       ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false);
       ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
-
-      // Highlight 61.8% line
-      if(StringFind(g_fibLabels[i], "61.8") >= 0)
-         ObjectSetInteger(0, lineName, OBJPROP_WIDTH, InpFibLineWidth + 1);
+      ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
 
       // Add label
-      ObjectCreate(0, labelName, OBJ_TEXT, 0, endTime, g_fibLevels[i]);
-      ObjectSetString(0, labelName, OBJPROP_TEXT,
-                      g_fibLabels[i] + " (" + DoubleToString(g_fibLevels[i], g_digits) + ")");
+      string labelText = g_fibLevels[i].label + " (" + DoubleToString(g_fibLevels[i].price, g_symbolInfo.digits) + ")";
+      if(g_fibLevels[i].isMitigated)
+         labelText += " [M]";
+      if(g_fibLevels[i].isOTE && !g_fibLevels[i].isMitigated)
+         labelText += " [OTE]";
+
+      ObjectCreate(0, labelName, OBJ_TEXT, 0, endTime, g_fibLevels[i].price);
+      ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
       ObjectSetInteger(0, labelName, OBJPROP_COLOR, lineColor);
       ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
       ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT);
@@ -552,64 +712,91 @@ void DrawFibonacci()
    ObjectSetInteger(0, swingLine, OBJPROP_RAY_RIGHT, false);
    ObjectSetInteger(0, swingLine, OBJPROP_SELECTABLE, false);
 
-   // Draw Fibonacci Fan if enabled
-   if(InpShowFibFan)
-      DrawFibFan();
+   // Draw swing point markers
+   DrawSwingMarkers();
 
    ChartRedraw();
+   g_lastFibUpdate = TimeCurrent();
 }
 
 //+------------------------------------------------------------------+
-//| Draw Fibonacci Fan                                                |
+//| Draw OTE Zone Rectangle                                           |
 //+------------------------------------------------------------------+
-void DrawFibFan()
+void DrawOTEZone(datetime startTime, datetime endTime)
 {
-   double range = g_fibSwingHigh - g_fibSwingLow;
-   datetime startTime, endTime;
-   double startPrice;
+   string zoneName = "Fib_OTE_Zone";
 
-   if(g_fibDirection == BIAS_BULLISH)
-   {
-      startTime = g_fibSwingLowTime;
-      startPrice = g_fibSwingLow;
-      endTime = g_fibSwingHighTime;
-   }
-   else
-   {
-      startTime = g_fibSwingHighTime;
-      startPrice = g_fibSwingHigh;
-      endTime = g_fibSwingLowTime;
-   }
+   ObjectCreate(0, zoneName, OBJ_RECTANGLE, 0, startTime, g_oteUpperPrice, endTime, g_oteLowerPrice);
+   ObjectSetInteger(0, zoneName, OBJPROP_COLOR, InpOTEZoneColor);
+   ObjectSetInteger(0, zoneName, OBJPROP_FILL, true);
+   ObjectSetInteger(0, zoneName, OBJPROP_BACK, true);
+   ObjectSetInteger(0, zoneName, OBJPROP_SELECTABLE, false);
 
-   // Calculate time difference
-   int barsDiff = MathAbs(g_fibSwingHighBar - g_fibSwingLowBar);
-   datetime futureTime = TimeCurrent() + PeriodSeconds(InpFibTimeframe) * barsDiff * 2;
+   // Add OTE label
+   string oteLabel = "Fib_OTE_Label";
+   double midPrice = (g_oteUpperPrice + g_oteLowerPrice) / 2;
+   ObjectCreate(0, oteLabel, OBJ_TEXT, 0, startTime, midPrice);
+   ObjectSetString(0, oteLabel, OBJPROP_TEXT, "OTE ZONE");
+   ObjectSetInteger(0, oteLabel, OBJPROP_COLOR, InpOTEZoneColor);
+   ObjectSetInteger(0, oteLabel, OBJPROP_FONTSIZE, 10);
+   ObjectSetString(0, oteLabel, OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, oteLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
+}
 
-   // Fan levels: 38.2%, 50%, 61.8%
-   double fanLevels[] = {0.382, 0.500, 0.618};
-   string fanLabels[] = {"38.2%", "50%", "61.8%"};
+//+------------------------------------------------------------------+
+//| Draw Swing Point Markers                                          |
+//+------------------------------------------------------------------+
+void DrawSwingMarkers()
+{
+   // Swing High marker
+   string highMarker = "Fib_SwingHigh";
+   ObjectCreate(0, highMarker, OBJ_ARROW, 0, g_fibSwingHighTime, g_fibSwingHigh);
+   ObjectSetInteger(0, highMarker, OBJPROP_ARROWCODE, 218);  // Down arrow
+   ObjectSetInteger(0, highMarker, OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, highMarker, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, highMarker, OBJPROP_ANCHOR, ANCHOR_BOTTOM);
+   ObjectSetInteger(0, highMarker, OBJPROP_SELECTABLE, false);
 
-   for(int i = 0; i < 3; i++)
-   {
-      string fanName = "Fib_Fan_" + IntegerToString(i);
+   // Swing Low marker
+   string lowMarker = "Fib_SwingLow";
+   ObjectCreate(0, lowMarker, OBJ_ARROW, 0, g_fibSwingLowTime, g_fibSwingLow);
+   ObjectSetInteger(0, lowMarker, OBJPROP_ARROWCODE, 217);  // Up arrow
+   ObjectSetInteger(0, lowMarker, OBJPROP_COLOR, clrLimeGreen);
+   ObjectSetInteger(0, lowMarker, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, lowMarker, OBJPROP_ANCHOR, ANCHOR_TOP);
+   ObjectSetInteger(0, lowMarker, OBJPROP_SELECTABLE, false);
+}
 
-      double endPrice;
-      if(g_fibDirection == BIAS_BULLISH)
-         endPrice = g_fibSwingLow + range * fanLevels[i];
-      else
-         endPrice = g_fibSwingHigh - range * fanLevels[i];
+//+------------------------------------------------------------------+
+//| Get Level Color                                                   |
+//+------------------------------------------------------------------+
+color GetLevelColor(int index)
+{
+   if(g_fibLevels[index].isMitigated)
+      return InpMitigatedColor;
 
-      // Project the fan line forward
-      double slope = (endPrice - startPrice) / barsDiff;
-      double futurePrice = startPrice + slope * barsDiff * 3;
+   // 61.8% highlight
+   if(StringFind(g_fibLevels[index].label, "61.8") >= 0)
+      return InpFib618Color;
 
-      ObjectCreate(0, fanName, OBJ_TREND, 0, startTime, startPrice, futureTime, futurePrice);
-      ObjectSetInteger(0, fanName, OBJPROP_COLOR, InpFanColor);
-      ObjectSetInteger(0, fanName, OBJPROP_STYLE, STYLE_DOT);
-      ObjectSetInteger(0, fanName, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, fanName, OBJPROP_RAY_RIGHT, true);
-      ObjectSetInteger(0, fanName, OBJPROP_SELECTABLE, false);
-   }
+   // Extension levels
+   if(!g_fibLevels[index].isRetracement)
+      return InpExtensionColor;
+
+   // OTE zone levels
+   if(g_fibLevels[index].isOTE)
+      return InpFib618Color;
+
+   // Default
+   return InpFibColor;
+}
+
+//+------------------------------------------------------------------+
+//| Cleanup Fibonacci Objects                                         |
+//+------------------------------------------------------------------+
+void CleanupFibObjects()
+{
+   ObjectsDeleteAll(0, "Fib_");
 }
 
 //+------------------------------------------------------------------+
@@ -620,6 +807,10 @@ string GetPriceFibPosition(double price)
    if(!g_fibValid || g_fibLevelCount < 2)
       return "N/A";
 
+   // Check if in OTE zone
+   if(g_priceInOTE)
+      return "IN OTE ZONE (61.8-78.6%)";
+
    // Find the nearest level ABOVE and BELOW current price
    double nearestAbove = DBL_MAX;
    double nearestBelow = -DBL_MAX;
@@ -628,61 +819,74 @@ string GetPriceFibPosition(double price)
 
    for(int i = 0; i < g_fibLevelCount; i++)
    {
-      if(g_fibLevels[i] >= price && g_fibLevels[i] < nearestAbove)
+      if(g_fibLevels[i].price >= price && g_fibLevels[i].price < nearestAbove)
       {
-         nearestAbove = g_fibLevels[i];
-         labelAbove = g_fibLabels[i];
+         nearestAbove = g_fibLevels[i].price;
+         labelAbove = g_fibLevels[i].label;
       }
-      if(g_fibLevels[i] <= price && g_fibLevels[i] > nearestBelow)
+      if(g_fibLevels[i].price <= price && g_fibLevels[i].price > nearestBelow)
       {
-         nearestBelow = g_fibLevels[i];
-         labelBelow = g_fibLabels[i];
+         nearestBelow = g_fibLevels[i].price;
+         labelBelow = g_fibLevels[i].label;
       }
    }
 
-   // Check if price is exactly at a level
-   if(MathAbs(nearestAbove - nearestBelow) < g_point * 10)
+   if(MathAbs(nearestAbove - nearestBelow) < g_symbolInfo.point * 10)
       return "At " + labelAbove;
 
-   // Check if above all levels
    if(nearestAbove == DBL_MAX)
       return "Above " + labelBelow;
 
-   // Check if below all levels
    if(nearestBelow == -DBL_MAX)
       return "Below " + labelAbove;
 
-   // Price is between two levels
    return "Between " + labelBelow + " and " + labelAbove;
 }
 
 //+------------------------------------------------------------------+
 //| Get nearest Fibonacci level                                       |
 //+------------------------------------------------------------------+
-double GetNearestFibLevel(double price, string &levelLabel)
+double GetNearestFibLevel(double price, string &levelLabel, bool &isMitigated)
 {
    if(!g_fibValid || g_fibLevelCount == 0)
    {
       levelLabel = "N/A";
+      isMitigated = false;
       return 0;
    }
 
-   double nearestLevel = g_fibLevels[0];
-   double minDistance = MathAbs(price - g_fibLevels[0]);
-   levelLabel = g_fibLabels[0];
+   double nearestLevel = g_fibLevels[0].price;
+   double minDistance = MathAbs(price - g_fibLevels[0].price);
+   levelLabel = g_fibLevels[0].label;
+   isMitigated = g_fibLevels[0].isMitigated;
 
    for(int i = 1; i < g_fibLevelCount; i++)
    {
-      double dist = MathAbs(price - g_fibLevels[i]);
+      double dist = MathAbs(price - g_fibLevels[i].price);
       if(dist < minDistance)
       {
          minDistance = dist;
-         nearestLevel = g_fibLevels[i];
-         levelLabel = g_fibLabels[i];
+         nearestLevel = g_fibLevels[i].price;
+         levelLabel = g_fibLevels[i].label;
+         isMitigated = g_fibLevels[i].isMitigated;
       }
    }
 
    return nearestLevel;
+}
+
+//+------------------------------------------------------------------+
+//| Count Fresh (non-mitigated) Levels                                |
+//+------------------------------------------------------------------+
+int CountFreshLevels()
+{
+   int count = 0;
+   for(int i = 0; i < g_fibLevelCount; i++)
+   {
+      if(!g_fibLevels[i].isMitigated)
+         count++;
+   }
+   return count;
 }
 
 //+------------------------------------------------------------------+
@@ -694,29 +898,27 @@ void PrintFibReport()
 
    Print("");
    Print("=================================================");
-   Print("       FIBONACCI REPORT (Section 5)              ");
+   Print("       FIBONACCI REPORT (Section 5 v2.0)         ");
    Print("=================================================");
-   Print("Symbol: ", _Symbol);
+   Print("Symbol: ", _Symbol, " (", (g_symbolInfo.isGold ? "GOLD" : g_symbolInfo.isSilver ? "SILVER" : "FOREX"), ")");
    Print("Timeframe: ", TimeframeToString(InpFibTimeframe));
    Print("Analysis Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
-   Print("Current Price: ", DoubleToString(currentPrice, g_digits));
+   Print("Current Price: ", DoubleToString(currentPrice, g_symbolInfo.digits));
    Print("-------------------------------------------------");
 
    // ATR Status
-   if(InpUseATRFilter)
-   {
-      Print("ATR FILTER:");
-      Print("  ATR Value: ", DoubleToString(g_atrResult.atrValue, 2), " pips");
-      Print("  Condition: ", MarketConditionToString(g_atrResult.condition));
-      Print("-------------------------------------------------");
-   }
+   Print("ATR FILTER:");
+   Print("  ATR Value: ", DoubleToString(g_atrResult.atrValue, 2), " pips");
+   Print("  ATR Raw: ", DoubleToString(g_currentATR, g_symbolInfo.digits), " points");
+   Print("  Condition: ", MarketConditionToString(g_atrResult.condition));
+   Print("-------------------------------------------------");
 
    // EMA Status
    if(InpUseEMAFilter)
    {
       Print("EMA TREND:");
-      Print("  EMA 50: ", DoubleToString(g_emaResult.ema50, g_digits));
-      Print("  EMA 200: ", DoubleToString(g_emaResult.ema200, g_digits));
+      Print("  EMA 50: ", DoubleToString(g_emaResult.ema50, g_symbolInfo.digits));
+      Print("  EMA 200: ", DoubleToString(g_emaResult.ema200, g_symbolInfo.digits));
       Print("  Trend: ", TrendBiasToString(g_emaResult.trend));
       Print("-------------------------------------------------");
    }
@@ -725,11 +927,11 @@ void PrintFibReport()
    Print("FIBONACCI SWING POINTS:");
    if(g_fibValid)
    {
-      Print("  Swing High: ", DoubleToString(g_fibSwingHigh, g_digits),
+      Print("  Swing High: ", DoubleToString(g_fibSwingHigh, g_symbolInfo.digits),
             " at ", TimeToString(g_fibSwingHighTime, TIME_DATE|TIME_MINUTES));
-      Print("  Swing Low: ", DoubleToString(g_fibSwingLow, g_digits),
+      Print("  Swing Low: ", DoubleToString(g_fibSwingLow, g_symbolInfo.digits),
             " at ", TimeToString(g_fibSwingLowTime, TIME_DATE|TIME_MINUTES));
-      Print("  Range: ", DoubleToString(g_fibSwingHigh - g_fibSwingLow, g_digits));
+      Print("  Range: ", DoubleToString(g_fibSwingHigh - g_fibSwingLow, g_symbolInfo.digits));
       Print("  Direction: ", TrendBiasToString(g_fibDirection));
    }
    else
@@ -738,19 +940,34 @@ void PrintFibReport()
    }
    Print("-------------------------------------------------");
 
-   // Fibonacci Levels
-   Print("FIBONACCI LEVELS:");
+   // OTE Zone
+   if(InpShowOTEZone && g_fibValid)
+   {
+      Print("OTE ZONE (Optimal Trade Entry):");
+      Print("  Upper: ", DoubleToString(g_oteUpperPrice, g_symbolInfo.digits), " (61.8%)");
+      Print("  Lower: ", DoubleToString(g_oteLowerPrice, g_symbolInfo.digits), " (78.6%)");
+      Print("  Price in OTE: ", g_priceInOTE ? ">>> YES <<<" : "NO");
+      Print("-------------------------------------------------");
+   }
+
+   // Fibonacci Levels with Mitigation Status
+   Print("FIBONACCI LEVELS (Fresh: ", CountFreshLevels(), "/", g_fibLevelCount, "):");
    if(g_fibValid)
    {
       for(int i = 0; i < g_fibLevelCount; i++)
       {
          string marker = "";
-         double dist = currentPrice - g_fibLevels[i];
+         double dist = currentPrice - g_fibLevels[i].price;
 
          if(MathAbs(dist) < (g_fibSwingHigh - g_fibSwingLow) * 0.02)
             marker = " <-- PRICE HERE";
 
-         Print("  ", g_fibLabels[i], ": ", DoubleToString(g_fibLevels[i], g_digits), marker);
+         string status = g_fibLevels[i].isMitigated ? " [MITIGATED]" : " [FRESH]";
+         string ote = g_fibLevels[i].isOTE ? " *OTE*" : "";
+
+         Print("  ", g_fibLevels[i].label, ": ",
+               DoubleToString(g_fibLevels[i].price, g_symbolInfo.digits),
+               status, ote, marker);
       }
    }
    Print("-------------------------------------------------");
@@ -760,12 +977,14 @@ void PrintFibReport()
    Print("  Location: ", GetPriceFibPosition(currentPrice));
 
    string nearestLabel;
-   double nearestLevel = GetNearestFibLevel(currentPrice, nearestLabel);
+   bool nearestMitigated;
+   double nearestLevel = GetNearestFibLevel(currentPrice, nearestLabel, nearestMitigated);
    if(nearestLevel > 0)
    {
       double distToNearest = currentPrice - nearestLevel;
-      Print("  Nearest Level: ", nearestLabel, " (", DoubleToString(nearestLevel, g_digits), ")");
-      Print("  Distance: ", DoubleToString(distToNearest, g_digits));
+      Print("  Nearest Level: ", nearestLabel, " (", DoubleToString(nearestLevel, g_symbolInfo.digits), ")");
+      Print("  Distance: ", DoubleToString(distToNearest, g_symbolInfo.digits));
+      Print("  Level Status: ", nearestMitigated ? "MITIGATED" : "FRESH");
    }
    Print("-------------------------------------------------");
 
@@ -796,94 +1015,94 @@ void PrintTradingRecommendation(double currentPrice)
       return;
    }
 
+   // Check if in OTE zone
+   if(g_priceInOTE)
+   {
+      if(g_fibDirection == BIAS_BULLISH)
+      {
+         Print("  STATUS: >>> OPTIMAL BUY ZONE <<<");
+         Print("  REASON: Price in OTE zone (61.8-78.6%) in bullish trend");
+         Print("  ACTION: Look for bullish confirmation (BOS/CHoCH on lower TF)");
+         Print("  SL: Below 88.6% or swing low");
+         Print("  TP1: Swing high (100%)");
+         Print("  TP2: 127.2% extension");
+      }
+      else
+      {
+         Print("  STATUS: >>> OPTIMAL SELL ZONE <<<");
+         Print("  REASON: Price in OTE zone (61.8-78.6%) in bearish trend");
+         Print("  ACTION: Look for bearish confirmation (BOS/CHoCH on lower TF)");
+         Print("  SL: Above 88.6% or swing high");
+         Print("  TP1: Swing low (100%)");
+         Print("  TP2: 127.2% extension");
+      }
+
+      // Caution for extreme ATR
+      if(g_atrResult.condition == MARKET_EXTREME)
+         Print("  CAUTION: High volatility - reduce position size");
+
+      return;
+   }
+
+   // Standard recommendations based on price position
    double range = g_fibSwingHigh - g_fibSwingLow;
    double fib236 = (g_fibDirection == BIAS_BULLISH) ?
                    g_fibSwingHigh - range * 0.236 : g_fibSwingLow + range * 0.236;
    double fib382 = (g_fibDirection == BIAS_BULLISH) ?
                    g_fibSwingHigh - range * 0.382 : g_fibSwingLow + range * 0.382;
-   double fib618 = (g_fibDirection == BIAS_BULLISH) ?
-                   g_fibSwingHigh - range * 0.618 : g_fibSwingLow + range * 0.618;
-   double fib786 = (g_fibDirection == BIAS_BULLISH) ?
-                   g_fibSwingHigh - range * 0.786 : g_fibSwingLow + range * 0.786;
 
    if(g_fibDirection == BIAS_BULLISH)
    {
-      // Bullish: Look for buy entries at retracement levels
       if(currentPrice > g_fibSwingHigh)
       {
          Print("  STATUS: BREAKOUT");
          Print("  REASON: Price above swing high");
          Print("  ACTION: Look for extension targets (127.2%, 161.8%)");
       }
-      else if(currentPrice >= fib236 && currentPrice <= g_fibSwingHigh)
-      {
-         Print("  STATUS: VERY SHALLOW PULLBACK");
-         Print("  REASON: Price at 0-23.6% retracement");
-         Print("  ACTION: Strong trend, wait for deeper pullback or breakout");
-      }
-      else if(currentPrice >= fib382 && currentPrice < fib236)
+      else if(currentPrice >= fib236)
       {
          Print("  STATUS: SHALLOW PULLBACK");
-         Print("  REASON: Price at 23.6-38.2% retracement");
-         Print("  ACTION: Approaching buy zone, prepare for entry");
+         Print("  REASON: Price at 0-38.2% retracement");
+         Print("  ACTION: Wait for deeper pullback to OTE zone (61.8-78.6%)");
       }
-      else if(currentPrice >= fib618 && currentPrice < fib382)
+      else if(currentPrice >= fib382 && currentPrice < g_oteUpperPrice)
       {
-         Print("  STATUS: POTENTIAL BUY ZONE");
-         Print("  REASON: Price at 38.2-61.8% retracement (Golden Zone)");
-         Print("  ACTION: Look for bullish confirmation to enter long");
+         Print("  STATUS: APPROACHING OTE");
+         Print("  REASON: Price at 38.2-61.8% retracement");
+         Print("  ACTION: Prepare for entry as price approaches OTE zone");
       }
-      else if(currentPrice >= fib786 && currentPrice < fib618)
+      else if(currentPrice < g_oteLowerPrice)
       {
          Print("  STATUS: DEEP PULLBACK");
-         Print("  REASON: Price at 61.8-78.6% retracement");
-         Print("  ACTION: High risk entry, need strong confirmation");
-      }
-      else if(currentPrice < fib786)
-      {
-         Print("  STATUS: CAUTION");
-         Print("  REASON: Price below 78.6% - trend may be reversing");
-         Print("  ACTION: Wait for structure confirmation");
+         Print("  REASON: Price below 78.6% - risky entry");
+         Print("  ACTION: Wait for structure confirmation or skip trade");
       }
    }
    else // BEARISH
    {
-      // Bearish: Look for sell entries at retracement levels
       if(currentPrice < g_fibSwingLow)
       {
          Print("  STATUS: BREAKOUT");
          Print("  REASON: Price below swing low");
          Print("  ACTION: Look for extension targets (127.2%, 161.8%)");
       }
-      else if(currentPrice <= fib236 && currentPrice >= g_fibSwingLow)
-      {
-         Print("  STATUS: VERY SHALLOW PULLBACK");
-         Print("  REASON: Price at 0-23.6% retracement");
-         Print("  ACTION: Strong trend, wait for deeper pullback or breakout");
-      }
-      else if(currentPrice <= fib382 && currentPrice > fib236)
+      else if(currentPrice <= fib236)
       {
          Print("  STATUS: SHALLOW PULLBACK");
-         Print("  REASON: Price at 23.6-38.2% retracement");
-         Print("  ACTION: Approaching sell zone, prepare for entry");
+         Print("  REASON: Price at 0-38.2% retracement");
+         Print("  ACTION: Wait for deeper pullback to OTE zone (61.8-78.6%)");
       }
-      else if(currentPrice <= fib618 && currentPrice > fib382)
+      else if(currentPrice <= fib382 && currentPrice > g_oteLowerPrice)
       {
-         Print("  STATUS: POTENTIAL SELL ZONE");
-         Print("  REASON: Price at 38.2-61.8% retracement (Golden Zone)");
-         Print("  ACTION: Look for bearish confirmation to enter short");
+         Print("  STATUS: APPROACHING OTE");
+         Print("  REASON: Price at 38.2-61.8% retracement");
+         Print("  ACTION: Prepare for entry as price approaches OTE zone");
       }
-      else if(currentPrice <= fib786 && currentPrice > fib618)
+      else if(currentPrice > g_oteUpperPrice)
       {
          Print("  STATUS: DEEP PULLBACK");
-         Print("  REASON: Price at 61.8-78.6% retracement");
-         Print("  ACTION: High risk entry, need strong confirmation");
-      }
-      else if(currentPrice > fib786)
-      {
-         Print("  STATUS: CAUTION");
-         Print("  REASON: Price above 78.6% - trend may be reversing");
-         Print("  ACTION: Wait for structure confirmation");
+         Print("  REASON: Price above 78.6% - risky entry");
+         Print("  ACTION: Wait for structure confirmation or skip trade");
       }
    }
 }
@@ -895,25 +1114,45 @@ void PrintInitReport()
 {
    Print("");
    Print("=================================================");
-   Print("     SWING TRADER PRO - SECTION 5                ");
-   Print("     FIBONACCI RETRACEMENT & FAN                 ");
+   Print("     SWING TRADER PRO - SECTION 5 (v2.0)         ");
+   Print("     FIBONACCI RETRACEMENT & OTE ZONE            ");
    Print("=================================================");
    Print("Initialization Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
    Print("-------------------------------------------------");
-   Print("SYMBOL: ", _Symbol);
+   Print("SYMBOL DETECTION:");
+   Print("  Symbol: ", _Symbol);
+   string typeStr = "Standard Forex";
+   if(g_symbolInfo.isGold) typeStr = "GOLD/XAU";
+   else if(g_symbolInfo.isSilver) typeStr = "SILVER/XAG";
+   else if(g_symbolInfo.isJPY) typeStr = "JPY Pair";
+   Print("  Type: ", typeStr);
+   Print("  Digits: ", g_symbolInfo.digits);
+   Print("  Pip Size: ", DoubleToString(g_symbolInfo.pipSize, 5));
+   Print("-------------------------------------------------");
    Print("TIMEFRAME: ", TimeframeToString(InpFibTimeframe));
    Print("-------------------------------------------------");
    Print("FIBONACCI SETTINGS:");
    Print("  Lookback: ", InpFibLookback, " candles");
    Print("  Swing Strength: ", InpSwingStrength, " bars");
+   Print("  Min Swing Size: ", DoubleToString(InpMinSwingATRMult, 1), "x ATR");
    Print("  Show Retracement: ", InpShowRetracement ? "YES" : "NO");
    Print("  Show Extension: ", InpShowExtension ? "YES" : "NO");
-   Print("  Show Fan: ", InpShowFibFan ? "YES" : "NO");
+   Print("  Show OTE Zone: ", InpShowOTEZone ? "YES" : "NO");
+   Print("-------------------------------------------------");
+   Print("LEVEL MITIGATION:");
+   Print("  Track Mitigation: ", InpUseMitigation ? "YES" : "NO");
+   Print("  Remove Mitigated: ", InpRemoveMitigated ? "YES (delete)" : "NO (gray out)");
+   Print("  Mitigation Buffer: ", DoubleToString(InpMitigationBuffer, 1), "x ATR");
    Print("-------------------------------------------------");
    Print("KEY LEVELS:");
-   Print("  Retracement: 23.6%, 38.2%, 50%, 61.8%, 78.6%");
-   Print("  Extension: 127.2%, 161.8%, 200%, 261.8%");
-   Print("  Golden Zone: 38.2% - 61.8% (Best entries)");
+   Print("  Retracement: 23.6%, 38.2%, 50%, 61.8%, 78.6%, 88.6%");
+   Print("  Extension: 113%, 127.2%, 161.8%, 200%, 261.8%");
+   Print("  OTE Zone: 61.8% - 78.6% (Optimal Trade Entry)");
+   Print("-------------------------------------------------");
+   Print("ICT/SMC CONCEPTS:");
+   Print("  OTE = Optimal Trade Entry (61.8-78.6%)");
+   Print("  Fresh levels = Not yet touched by price");
+   Print("  Mitigated levels = Already touched (weaker)");
    Print("=================================================");
    Print("");
 }
@@ -926,23 +1165,25 @@ void CreatePanel()
    int x = InpPanelX;
    int y = InpPanelY;
 
-   CreateRectangle(g_panelName + "_bg", x, y, 320, 280, clrBlack, 200);
+   CreateRectangle(g_panelName + "_bg", x, y, 320, 340, clrBlack, 200);
 
    CreateLabel(g_panelName + "_title", x + 10, y + 5,
-               "FIBONACCI ANALYSIS", clrGold, 10, "Arial Bold");
+               "FIBONACCI ANALYSIS v2.0", clrGold, 10, "Arial Bold");
 
    CreateLabel(g_panelName + "_sep1", x + 10, y + 25,
                "------------------------------------", clrGray, 8, "Courier New");
 
    int yOff = 40;
 
+   // Symbol Type
+   CreateLabel(g_panelName + "_sym_label", x + 10, y + yOff, "Symbol:", clrWhite, 9, "Arial");
+   CreateLabel(g_panelName + "_sym_value", x + 120, y + yOff, _Symbol, clrCyan, 9, "Arial Bold");
+   yOff += 20;
+
    // ATR Status
-   if(InpUseATRFilter)
-   {
-      CreateLabel(g_panelName + "_atr_label", x + 10, y + yOff, "ATR:", clrWhite, 9, "Arial");
-      CreateLabel(g_panelName + "_atr_value", x + 120, y + yOff, "-- pips", clrYellow, 9, "Arial");
-      yOff += 20;
-   }
+   CreateLabel(g_panelName + "_atr_label", x + 10, y + yOff, "ATR:", clrWhite, 9, "Arial");
+   CreateLabel(g_panelName + "_atr_value", x + 120, y + yOff, "-- pips", clrYellow, 9, "Arial");
+   yOff += 20;
 
    // EMA/Direction
    CreateLabel(g_panelName + "_dir_label", x + 10, y + yOff, "Fib Direction:", clrWhite, 9, "Arial");
@@ -970,6 +1211,19 @@ void CreatePanel()
                "------------------------------------", clrGray, 8, "Courier New");
    yOff += 15;
 
+   // OTE Zone
+   CreateLabel(g_panelName + "_ote_label", x + 10, y + yOff, "OTE Zone:", clrWhite, 9, "Arial Bold");
+   CreateLabel(g_panelName + "_ote_value", x + 120, y + yOff, "--", InpOTEZoneColor, 9, "Arial Bold");
+   yOff += 20;
+
+   CreateLabel(g_panelName + "_ote_range", x + 10, y + yOff, "  Range:", clrGray, 8, "Arial");
+   CreateLabel(g_panelName + "_ote_range_val", x + 120, y + yOff, "--", clrGray, 8, "Arial");
+   yOff += 20;
+
+   CreateLabel(g_panelName + "_sep4", x + 10, y + yOff,
+               "------------------------------------", clrGray, 8, "Courier New");
+   yOff += 15;
+
    // Current Price
    CreateLabel(g_panelName + "_price_label", x + 10, y + yOff, "Price:", clrWhite, 9, "Arial");
    CreateLabel(g_panelName + "_price_value", x + 120, y + yOff, "--", clrWhite, 9, "Arial Bold");
@@ -980,17 +1234,17 @@ void CreatePanel()
    CreateLabel(g_panelName + "_pos_value", x + 120, y + yOff, "--", clrYellow, 9, "Arial");
    yOff += 20;
 
-   // Nearest Level
-   CreateLabel(g_panelName + "_near_label", x + 10, y + yOff, "Nearest:", clrWhite, 9, "Arial");
-   CreateLabel(g_panelName + "_near_value", x + 120, y + yOff, "--", InpFibColor, 9, "Arial");
+   // Levels Status
+   CreateLabel(g_panelName + "_lvl_label", x + 10, y + yOff, "Fresh Levels:", clrWhite, 9, "Arial");
+   CreateLabel(g_panelName + "_lvl_value", x + 120, y + yOff, "--", clrLimeGreen, 9, "Arial");
    yOff += 20;
 
-   CreateLabel(g_panelName + "_sep4", x + 10, y + yOff,
+   CreateLabel(g_panelName + "_sep5", x + 10, y + yOff,
                "------------------------------------", clrGray, 8, "Courier New");
    yOff += 15;
 
    // Recommendation
-   CreateLabel(g_panelName + "_rec_label", x + 10, y + yOff, "Zone:", clrWhite, 10, "Arial Bold");
+   CreateLabel(g_panelName + "_rec_label", x + 10, y + yOff, "Status:", clrWhite, 10, "Arial Bold");
    CreateLabel(g_panelName + "_rec_value", x + 120, y + yOff, "ANALYZING...", clrYellow, 10, "Arial Bold");
 }
 
@@ -1004,11 +1258,12 @@ void UpdatePanel()
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
    // Update ATR
-   if(InpUseATRFilter)
-   {
-      ObjectSetString(0, g_panelName + "_atr_value", OBJPROP_TEXT,
-                      DoubleToString(g_atrResult.atrValue, 1) + " pips");
-   }
+   ObjectSetString(0, g_panelName + "_atr_value", OBJPROP_TEXT,
+                   DoubleToString(g_atrResult.atrValue, 1) + " pips");
+   color atrColor = clrYellow;
+   if(g_atrResult.condition == MARKET_QUIET) atrColor = clrGray;
+   else if(g_atrResult.condition == MARKET_EXTREME) atrColor = clrOrange;
+   ObjectSetInteger(0, g_panelName + "_atr_value", OBJPROP_COLOR, atrColor);
 
    // Update direction
    string dirText = TrendBiasToString(g_fibDirection);
@@ -1021,29 +1276,39 @@ void UpdatePanel()
    if(g_fibValid)
    {
       ObjectSetString(0, g_panelName + "_high_value", OBJPROP_TEXT,
-                      DoubleToString(g_fibSwingHigh, g_digits));
+                      DoubleToString(g_fibSwingHigh, g_symbolInfo.digits));
       ObjectSetString(0, g_panelName + "_low_value", OBJPROP_TEXT,
-                      DoubleToString(g_fibSwingLow, g_digits));
+                      DoubleToString(g_fibSwingLow, g_symbolInfo.digits));
       ObjectSetString(0, g_panelName + "_range_value", OBJPROP_TEXT,
-                      DoubleToString(g_fibSwingHigh - g_fibSwingLow, g_digits));
+                      DoubleToString(g_fibSwingHigh - g_fibSwingLow, g_symbolInfo.digits));
+   }
+
+   // Update OTE Zone
+   if(g_oteUpperPrice > 0 && g_oteLowerPrice > 0)
+   {
+      string oteText = g_priceInOTE ? ">>> IN ZONE <<<" : "Outside";
+      color oteColor = g_priceInOTE ? clrLimeGreen : clrGray;
+      ObjectSetString(0, g_panelName + "_ote_value", OBJPROP_TEXT, oteText);
+      ObjectSetInteger(0, g_panelName + "_ote_value", OBJPROP_COLOR, oteColor);
+
+      ObjectSetString(0, g_panelName + "_ote_range_val", OBJPROP_TEXT,
+                      DoubleToString(g_oteLowerPrice, 0) + " - " + DoubleToString(g_oteUpperPrice, 0));
    }
 
    // Update price
    ObjectSetString(0, g_panelName + "_price_value", OBJPROP_TEXT,
-                   DoubleToString(currentPrice, g_digits));
+                   DoubleToString(currentPrice, g_symbolInfo.digits));
 
    // Update position
    string posText = GetPriceFibPosition(currentPrice);
-   // Truncate if too long
-   if(StringLen(posText) > 20)
-      posText = StringSubstr(posText, 0, 20) + "...";
+   if(StringLen(posText) > 25)
+      posText = StringSubstr(posText, 0, 25) + "...";
    ObjectSetString(0, g_panelName + "_pos_value", OBJPROP_TEXT, posText);
 
-   // Update nearest level
-   string nearLabel;
-   double nearLevel = GetNearestFibLevel(currentPrice, nearLabel);
-   ObjectSetString(0, g_panelName + "_near_value", OBJPROP_TEXT,
-                   nearLabel + " (" + DoubleToString(nearLevel, 0) + ")");
+   // Update fresh levels count
+   int freshCount = CountFreshLevels();
+   ObjectSetString(0, g_panelName + "_lvl_value", OBJPROP_TEXT,
+                   IntegerToString(freshCount) + "/" + IntegerToString(g_fibLevelCount));
 
    // Update recommendation
    string recText = "";
@@ -1054,41 +1319,26 @@ void UpdatePanel()
       recText = "NO DATA";
       recColor = clrGray;
    }
-   else if(InpUseATRFilter && !g_atrResult.tradingAllowed)
+   else if(!g_atrResult.tradingAllowed)
    {
       recText = "NO TRADE (ATR)";
       recColor = clrGray;
    }
+   else if(g_priceInOTE)
+   {
+      recText = g_fibDirection == BIAS_BULLISH ? "OTE BUY ZONE" : "OTE SELL ZONE";
+      recColor = clrLimeGreen;
+   }
+   else if((g_fibDirection == BIAS_BULLISH && currentPrice > g_fibSwingHigh) ||
+           (g_fibDirection == BIAS_BEARISH && currentPrice < g_fibSwingLow))
+   {
+      recText = "BREAKOUT";
+      recColor = InpExtensionColor;
+   }
    else
    {
-      double range = g_fibSwingHigh - g_fibSwingLow;
-      double fib382 = (g_fibDirection == BIAS_BULLISH) ?
-                      g_fibSwingHigh - range * 0.382 : g_fibSwingLow + range * 0.382;
-      double fib618 = (g_fibDirection == BIAS_BULLISH) ?
-                      g_fibSwingHigh - range * 0.618 : g_fibSwingLow + range * 0.618;
-
-      bool inGoldenZone = false;
-      if(g_fibDirection == BIAS_BULLISH)
-         inGoldenZone = (currentPrice >= fib618 && currentPrice <= fib382);
-      else
-         inGoldenZone = (currentPrice <= fib618 && currentPrice >= fib382);
-
-      if(inGoldenZone)
-      {
-         recText = "GOLDEN ZONE";
-         recColor = InpFib618Color;
-      }
-      else if((g_fibDirection == BIAS_BULLISH && currentPrice > g_fibSwingHigh) ||
-              (g_fibDirection == BIAS_BEARISH && currentPrice < g_fibSwingLow))
-      {
-         recText = "BREAKOUT";
-         recColor = InpExtensionColor;
-      }
-      else
-      {
-         recText = "WAIT";
-         recColor = clrYellow;
-      }
+      recText = "WAIT FOR OTE";
+      recColor = clrYellow;
    }
 
    ObjectSetString(0, g_panelName + "_rec_value", OBJPROP_TEXT, recText);
@@ -1152,7 +1402,34 @@ void CreateLabel(string name, int x, int y, string text, color clr, int fontSize
 bool IsFibValid() { return g_fibValid; }
 double GetFibSwingHigh() { return g_fibSwingHigh; }
 double GetFibSwingLow() { return g_fibSwingLow; }
+datetime GetFibSwingHighTime() { return g_fibSwingHighTime; }
+datetime GetFibSwingLowTime() { return g_fibSwingLowTime; }
 ENUM_TREND_BIAS GetFibDirection() { return g_fibDirection; }
-double GetFibLevel(int index) { return (index < g_fibLevelCount) ? g_fibLevels[index] : 0; }
-int GetFibLevelCount() { return g_fibLevelCount; }
+bool IsPriceInOTE() { return g_priceInOTE; }
+double GetOTEUpperPrice() { return g_oteUpperPrice; }
+double GetOTELowerPrice() { return g_oteLowerPrice; }
+int GetFreshLevelCount() { return CountFreshLevels(); }
+double GetATRPips() { return g_currentATRPips; }
+
+// Get specific fib level by ratio
+double GetFibLevelByRatio(double ratio)
+{
+   for(int i = 0; i < g_fibLevelCount; i++)
+   {
+      if(MathAbs(g_fibLevels[i].ratio - ratio) < 0.001)
+         return g_fibLevels[i].price;
+   }
+   return 0;
+}
+
+// Check if specific level is mitigated
+bool IsLevelMitigated(double ratio)
+{
+   for(int i = 0; i < g_fibLevelCount; i++)
+   {
+      if(MathAbs(g_fibLevels[i].ratio - ratio) < 0.001)
+         return g_fibLevels[i].isMitigated;
+   }
+   return false;
+}
 //+------------------------------------------------------------------+
