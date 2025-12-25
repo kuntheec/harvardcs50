@@ -1,14 +1,26 @@
 //+------------------------------------------------------------------+
 //|                                        Section09_NewsFilter.mq5 |
 //|                                      SwingTrader Pro EA          |
-//|                    Section 9: Economic News Filter               |
+//|                    Section 9: Economic News Filter (v2.00)       |
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.00"
-#property description "Section 9: Economic News Filter"
+#property version   "2.00"
+#property description "Section 9: Economic News Filter v2.00"
 #property description "Filters trading during high-impact news events"
-#property description "Uses MT5 Economic Calendar + Manual Events"
+#property description "Dynamic block times, risk scoring, ATR extension"
+
+//+------------------------------------------------------------------+
+//| Modification History                                              |
+//+------------------------------------------------------------------+
+// 2025.12.25 v2.00 - Major improvements based on Grok SMC review:
+//                    - Dynamic block times by impact (High:60/45, Med:30/20, Low:15/10)
+//                    - Event risk scoring (NFP/FOMC=10, GDP=7, etc.)
+//                    - Enhanced close logic (hours before, not 5 min)
+//                    - ATR-based post-news extension
+//                    - Optimized timer and event caching
+// 2025.12.23 v1.00 - Initial release
+//+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
 //| Include Files                                                     |
@@ -24,10 +36,28 @@ input bool     InpFilterHighImpact    = true;     // Filter High Impact News
 input bool     InpFilterMediumImpact  = false;    // Filter Medium Impact News
 input bool     InpFilterLowImpact     = false;    // Filter Low Impact News
 
-input group "=== Time Restrictions ==="
-input int      InpMinutesBefore       = 30;       // Minutes Before News to Stop Trading
-input int      InpMinutesAfter        = 30;       // Minutes After News to Resume Trading
-input bool     InpCloseBeforeNews     = false;    // Close Positions Before News
+input group "=== Time Restrictions (Dynamic by Impact) ==="
+input bool     InpUseDynamicTimes     = true;     // Use Dynamic Block Times (by impact)
+input int      InpHighMinsBefore      = 60;       // High Impact: Minutes Before
+input int      InpHighMinsAfter       = 45;       // High Impact: Minutes After
+input int      InpMedMinsBefore       = 30;       // Medium Impact: Minutes Before
+input int      InpMedMinsAfter        = 20;       // Medium Impact: Minutes After
+input int      InpLowMinsBefore       = 15;       // Low Impact: Minutes Before
+input int      InpLowMinsAfter        = 10;       // Low Impact: Minutes After
+input int      InpMinutesBefore       = 30;       // Fixed Minutes Before (if dynamic disabled)
+input int      InpMinutesAfter        = 30;       // Fixed Minutes After (if dynamic disabled)
+
+input group "=== Close Position Settings ==="
+input bool     InpCloseBeforeNews     = false;    // Close Positions Before High Impact News
+input int      InpCloseHoursBefore    = 2;        // Hours Before High Impact to Close
+input bool     InpPartialCloseEnabled = false;    // Enable Partial Close for Medium Impact
+input double   InpPartialClosePercent = 50.0;     // Partial Close Percentage
+
+input group "=== ATR Extension Settings ==="
+input bool     InpUseATRExtension     = true;     // Extend Block if ATR Spikes Post-News
+input double   InpATRSpikeMultiplier  = 1.5;      // ATR Spike Threshold (x normal)
+input int      InpATRPeriod           = 14;       // ATR Period
+input int      InpMaxExtensionMins    = 30;       // Max Extension Minutes
 
 input group "=== Currency Filter ==="
 input bool     InpFilterBaseCurrency  = true;     // Filter Base Currency News
@@ -77,6 +107,9 @@ struct NewsEvent
    string            currency;       // Affected currency
    datetime          eventTime;      // Event time
    ENUM_NEWS_IMPACT  impact;         // Event impact level
+   int               riskScore;      // Risk score 1-10 (NFP/FOMC=10, GDP=7, etc.)
+   int               minsBefore;     // Dynamic minutes before
+   int               minsAfter;      // Dynamic minutes after
    bool              isManual;       // Is manual entry
 };
 
@@ -90,6 +123,9 @@ struct NewsFilterResult
    int               minutesSinceLastNews; // Minutes since last news
    int               upcomingHighCount;  // High impact events in next 24h
    int               upcomingMediumCount;// Medium impact events in next 24h
+   int               currentRiskScore;   // Current event risk score
+   bool              atrExtended;        // Is block extended due to ATR spike
+   int               extensionMinutes;   // Additional extension minutes
    string            statusMessage;
    datetime          lastUpdate;
 };
@@ -113,6 +149,16 @@ string            g_quoteCurrency;
 
 // Calendar availability flag
 bool              g_calendarAvailable = false;
+
+// ATR for extension
+int               g_atrHandle;
+double            g_atrBuffer[];
+double            g_normalATR = 0;
+double            g_currentATR = 0;
+
+// Event caching
+datetime          g_lastEventRefresh = 0;
+int               g_eventCacheMinutes = 15;  // Refresh events every 15 min
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -138,6 +184,26 @@ int OnInit()
    // Initialize news events array
    ArrayResize(g_newsEvents, 0);
    g_newsEventCount = 0;
+
+   // Initialize ATR handle for extension feature
+   if(InpUseATRExtension)
+   {
+      g_atrHandle = iATR(_Symbol, PERIOD_H1, InpATRPeriod);
+      if(g_atrHandle == INVALID_HANDLE)
+      {
+         Print("WARNING: Failed to create ATR handle for news extension");
+      }
+      ArraySetAsSeries(g_atrBuffer, true);
+
+      // Get initial ATR as baseline
+      if(CopyBuffer(g_atrHandle, 0, 0, 20, g_atrBuffer) >= 20)
+      {
+         double sum = 0;
+         for(int i = 0; i < 20; i++) sum += g_atrBuffer[i];
+         g_normalATR = sum / 20.0;
+         g_currentATR = g_atrBuffer[0];
+      }
+   }
 
    // Check if economic calendar is available
    CheckCalendarAvailability();
@@ -204,8 +270,22 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-   // Full news analysis every minute
-   AnalyzeNews();
+   // Only refresh events from calendar every 15 minutes (caching)
+   datetime currentTime = TimeCurrent();
+   bool needsRefresh = (currentTime - g_lastEventRefresh) >= (g_eventCacheMinutes * 60);
+
+   if(needsRefresh)
+   {
+      // Full news analysis (refresh from calendar)
+      AnalyzeNews();
+      g_lastEventRefresh = currentTime;
+   }
+   else
+   {
+      // Just check trading status (no calendar refresh)
+      CheckTradingStatus();
+      CountUpcomingEvents();
+   }
 
    if(InpShowPanel) UpdatePanel();
 }
@@ -368,6 +448,130 @@ bool IsGlobalEvent(string eventName)
 }
 
 //+------------------------------------------------------------------+
+//| Calculate Event Risk Score (1-10)                                 |
+//+------------------------------------------------------------------+
+int CalculateRiskScore(string eventName, ENUM_NEWS_IMPACT impact)
+{
+   string lowerName = eventName;
+   StringToLower(lowerName);
+
+   // Tier 1: Maximum Risk (Score 10) - Market Moving Events
+   if(StringFind(lowerName, "nonfarm") >= 0 || StringFind(lowerName, "nfp") >= 0)
+      return 10;
+   if(StringFind(lowerName, "fomc") >= 0)
+      return 10;
+   if(StringFind(lowerName, "fed") >= 0 && StringFind(lowerName, "rate") >= 0)
+      return 10;
+
+   // Tier 2: Very High Risk (Score 8-9)
+   if(StringFind(lowerName, "cpi") >= 0)
+      return 9;
+   if(StringFind(lowerName, "ecb") >= 0 && StringFind(lowerName, "rate") >= 0)
+      return 9;
+   if(StringFind(lowerName, "boe") >= 0 && StringFind(lowerName, "rate") >= 0)
+      return 9;
+
+   // Tier 3: High Risk (Score 7)
+   if(StringFind(lowerName, "gdp") >= 0)
+      return 7;
+   if(StringFind(lowerName, "retail sales") >= 0)
+      return 7;
+   if(StringFind(lowerName, "unemployment") >= 0)
+      return 7;
+   if(StringFind(lowerName, "pmi") >= 0)
+      return 7;
+
+   // Tier 4: Medium Risk (Score 5-6)
+   if(StringFind(lowerName, "trade balance") >= 0)
+      return 6;
+   if(StringFind(lowerName, "housing") >= 0)
+      return 5;
+   if(StringFind(lowerName, "confidence") >= 0)
+      return 5;
+
+   // Default based on impact level
+   switch(impact)
+   {
+      case IMPACT_HIGH:   return 6;
+      case IMPACT_MEDIUM: return 4;
+      case IMPACT_LOW:    return 2;
+      default:            return 1;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Get Dynamic Block Minutes by Impact                               |
+//+------------------------------------------------------------------+
+void GetDynamicBlockMinutes(ENUM_NEWS_IMPACT impact, int &minsBefore, int &minsAfter)
+{
+   if(!InpUseDynamicTimes)
+   {
+      minsBefore = InpMinutesBefore;
+      minsAfter = InpMinutesAfter;
+      return;
+   }
+
+   switch(impact)
+   {
+      case IMPACT_HIGH:
+         minsBefore = InpHighMinsBefore;
+         minsAfter = InpHighMinsAfter;
+         break;
+      case IMPACT_MEDIUM:
+         minsBefore = InpMedMinsBefore;
+         minsAfter = InpMedMinsAfter;
+         break;
+      case IMPACT_LOW:
+         minsBefore = InpLowMinsBefore;
+         minsAfter = InpLowMinsAfter;
+         break;
+      default:
+         minsBefore = InpMinutesBefore;
+         minsAfter = InpMinutesAfter;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check ATR Spike for Post-News Extension                           |
+//+------------------------------------------------------------------+
+int CheckATRExtension()
+{
+   if(!InpUseATRExtension || g_atrHandle == INVALID_HANDLE)
+      return 0;
+
+   // Update current ATR
+   if(CopyBuffer(g_atrHandle, 0, 0, 1, g_atrBuffer) < 1)
+      return 0;
+
+   g_currentATR = g_atrBuffer[0];
+
+   // Check if ATR is spiking
+   if(g_normalATR > 0 && g_currentATR > g_normalATR * InpATRSpikeMultiplier)
+   {
+      // Calculate extension proportional to spike
+      double spikeRatio = g_currentATR / g_normalATR;
+      int extension = (int)((spikeRatio - 1.0) * InpMaxExtensionMins);
+      return MathMin(extension, InpMaxExtensionMins);
+   }
+
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Get Impact String                                                 |
+//+------------------------------------------------------------------+
+string GetImpactString(ENUM_NEWS_IMPACT impact)
+{
+   switch(impact)
+   {
+      case IMPACT_HIGH:   return "HIGH";
+      case IMPACT_MEDIUM: return "MED";
+      case IMPACT_LOW:    return "LOW";
+      default:            return "?";
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Load Manual Events                                                |
 //+------------------------------------------------------------------+
 void LoadManualEvents()
@@ -408,6 +612,15 @@ void AddNewsEvent(string name, string currency, datetime eventTime,
    g_newsEvents[count].impact = impact;
    g_newsEvents[count].isManual = isManual;
 
+   // Calculate risk score
+   g_newsEvents[count].riskScore = CalculateRiskScore(name, impact);
+
+   // Get dynamic block times
+   int minsBefore, minsAfter;
+   GetDynamicBlockMinutes(impact, minsBefore, minsAfter);
+   g_newsEvents[count].minsBefore = minsBefore;
+   g_newsEvents[count].minsAfter = minsAfter;
+
    g_newsEventCount = count + 1;
 }
 
@@ -421,6 +634,8 @@ void CheckTradingStatus()
       g_result.tradingStatus = TRADING_ALLOWED;
       g_result.tradingAllowed = true;
       g_result.statusMessage = "News filter disabled";
+      g_result.atrExtended = false;
+      g_result.extensionMinutes = 0;
       return;
    }
 
@@ -430,25 +645,38 @@ void CheckTradingStatus()
    g_result.minutesToNextNews = 9999;
    g_result.minutesSinceLastNews = 9999;
    g_result.statusMessage = "Safe to trade";
+   g_result.currentRiskScore = 0;
+   g_result.atrExtended = false;
+   g_result.extensionMinutes = 0;
 
    bool foundNextEvent = false;
+
+   // Check for ATR extension (post-news volatility)
+   int atrExtension = CheckATRExtension();
 
    for(int i = 0; i < g_newsEventCount; i++)
    {
       datetime eventTime = g_newsEvents[i].eventTime;
       int minutesDiff = (int)((eventTime - currentTime) / 60);
 
+      // Use dynamic block times from the event
+      int blockBefore = g_newsEvents[i].minsBefore;
+      int blockAfter = g_newsEvents[i].minsAfter + atrExtension;  // Add ATR extension
+
       // Event is in the future
       if(minutesDiff > 0)
       {
-         // Check if within pre-news restriction
-         if(minutesDiff <= InpMinutesBefore)
+         // Check if within pre-news restriction (using dynamic time)
+         if(minutesDiff <= blockBefore)
          {
             g_result.tradingStatus = TRADING_BLOCKED_BEFORE;
             g_result.tradingAllowed = false;
             g_result.currentEvent = g_newsEvents[i];
             g_result.minutesToNextNews = minutesDiff;
-            g_result.statusMessage = "BLOCKED - News in " + IntegerToString(minutesDiff) + " min";
+            g_result.currentRiskScore = g_newsEvents[i].riskScore;
+            g_result.statusMessage = "BLOCKED - " + GetImpactString(g_newsEvents[i].impact) +
+                                     " news in " + IntegerToString(minutesDiff) + " min (Risk: " +
+                                     IntegerToString(g_newsEvents[i].riskScore) + "/10)";
             return;
          }
 
@@ -465,14 +693,26 @@ void CheckTradingStatus()
       {
          int minutesSince = -minutesDiff;
 
-         // Check if within post-news restriction
-         if(minutesSince <= InpMinutesAfter)
+         // Check if within post-news restriction (using dynamic time + ATR extension)
+         if(minutesSince <= blockAfter)
          {
             g_result.tradingStatus = TRADING_BLOCKED_AFTER;
             g_result.tradingAllowed = false;
             g_result.currentEvent = g_newsEvents[i];
             g_result.minutesSinceLastNews = minutesSince;
-            g_result.statusMessage = "BLOCKED - News " + IntegerToString(minutesSince) + " min ago";
+            g_result.currentRiskScore = g_newsEvents[i].riskScore;
+
+            if(atrExtension > 0)
+            {
+               g_result.atrExtended = true;
+               g_result.extensionMinutes = atrExtension;
+               g_result.statusMessage = "BLOCKED - News " + IntegerToString(minutesSince) +
+                                        " min ago (ATR extended +" + IntegerToString(atrExtension) + " min)";
+            }
+            else
+            {
+               g_result.statusMessage = "BLOCKED - News " + IntegerToString(minutesSince) + " min ago";
+            }
             return;
          }
 
@@ -487,7 +727,8 @@ void CheckTradingStatus()
    // If we get here, trading is allowed
    if(foundNextEvent)
    {
-      g_result.statusMessage = "Safe - Next news in " + IntegerToString(g_result.minutesToNextNews) + " min";
+      g_result.statusMessage = "Safe - Next: " + GetImpactString(g_result.nextEvent.impact) +
+                               " in " + IntegerToString(g_result.minutesToNextNews) + " min";
    }
    else
    {
@@ -563,24 +804,31 @@ void PrintNewsReport()
       Print("  Currency: ", g_result.nextEvent.currency);
       Print("  Time: ", TimeToString(g_result.nextEvent.eventTime, TIME_DATE|TIME_MINUTES));
       Print("  In: ", g_result.minutesToNextNews, " minutes");
+      Print("  Risk Score: ", g_result.nextEvent.riskScore, "/10");
+      Print("  Block: ", g_result.nextEvent.minsBefore, " min before / ", g_result.nextEvent.minsAfter, " min after");
    }
    Print("-------------------------------------------------");
 
-   // List all events
+   // ATR Extension status
+   if(InpUseATRExtension)
+   {
+      Print("ATR EXTENSION STATUS:");
+      Print("  Current ATR: ", DoubleToString(g_currentATR, 5));
+      Print("  Normal ATR: ", DoubleToString(g_normalATR, 5));
+      Print("  Ratio: ", DoubleToString(g_normalATR > 0 ? g_currentATR / g_normalATR : 0, 2), "x");
+      Print("  Extended: ", g_result.atrExtended ? "YES (+" + IntegerToString(g_result.extensionMinutes) + " min)" : "NO");
+      Print("-------------------------------------------------");
+   }
+
+   // List all events with risk scores
    if(g_newsEventCount > 0)
    {
       Print("ALL TRACKED EVENTS:");
       for(int i = 0; i < MathMin(g_newsEventCount, 10); i++)
       {
-         string impactStr;
-         switch(g_newsEvents[i].impact)
-         {
-            case IMPACT_HIGH:   impactStr = "HIGH"; break;
-            case IMPACT_MEDIUM: impactStr = "MED"; break;
-            case IMPACT_LOW:    impactStr = "LOW"; break;
-            default:            impactStr = "?"; break;
-         }
-         Print("  [", impactStr, "] ", g_newsEvents[i].currency, " - ",
+         string impactStr = GetImpactString(g_newsEvents[i].impact);
+         Print("  [", impactStr, " Risk:", g_newsEvents[i].riskScore, "/10] ",
+               g_newsEvents[i].currency, " - ",
                TimeToString(g_newsEvents[i].eventTime, TIME_DATE|TIME_MINUTES),
                " - ", g_newsEvents[i].name);
       }
@@ -605,7 +853,7 @@ void PrintInitReport()
 {
    Print("");
    Print("=================================================");
-   Print("     SWING TRADER PRO - SECTION 9                ");
+   Print("     SWING TRADER PRO - SECTION 9 (v2.00)        ");
    Print("     ECONOMIC NEWS FILTER                        ");
    Print("=================================================");
    Print("Initialization Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
@@ -620,10 +868,35 @@ void PrintInitReport()
    Print("  Medium Impact: ", InpFilterMediumImpact ? "Yes" : "No");
    Print("  Low Impact: ", InpFilterLowImpact ? "Yes" : "No");
    Print("-------------------------------------------------");
-   Print("TIME RESTRICTIONS:");
-   Print("  Minutes Before: ", InpMinutesBefore);
-   Print("  Minutes After: ", InpMinutesAfter);
-   Print("  Close Before News: ", InpCloseBeforeNews ? "Yes" : "No");
+   Print("DYNAMIC TIME RESTRICTIONS:");
+   Print("  Dynamic Times: ", InpUseDynamicTimes ? "ENABLED" : "DISABLED");
+   if(InpUseDynamicTimes)
+   {
+      Print("  High Impact: ", InpHighMinsBefore, " min before / ", InpHighMinsAfter, " min after");
+      Print("  Medium Impact: ", InpMedMinsBefore, " min before / ", InpMedMinsAfter, " min after");
+      Print("  Low Impact: ", InpLowMinsBefore, " min before / ", InpLowMinsAfter, " min after");
+   }
+   else
+   {
+      Print("  Fixed: ", InpMinutesBefore, " min before / ", InpMinutesAfter, " min after");
+   }
+   Print("-------------------------------------------------");
+   Print("CLOSE POSITION SETTINGS:");
+   Print("  Close Before High Impact: ", InpCloseBeforeNews ? "Yes" : "No");
+   if(InpCloseBeforeNews)
+      Print("  Close Hours Before: ", InpCloseHoursBefore);
+   Print("  Partial Close (Medium): ", InpPartialCloseEnabled ? "Yes" : "No");
+   if(InpPartialCloseEnabled)
+      Print("  Partial Close %: ", InpPartialClosePercent);
+   Print("-------------------------------------------------");
+   Print("ATR EXTENSION SETTINGS:");
+   Print("  ATR Extension: ", InpUseATRExtension ? "ENABLED" : "DISABLED");
+   if(InpUseATRExtension)
+   {
+      Print("  ATR Spike Threshold: ", InpATRSpikeMultiplier, "x normal");
+      Print("  Max Extension: ", InpMaxExtensionMins, " min");
+      Print("  Normal ATR: ", DoubleToString(g_normalATR, 5));
+   }
    Print("-------------------------------------------------");
    Print("CURRENCY FILTER:");
    Print("  Base Currency (", g_baseCurrency, "): ", InpFilterBaseCurrency ? "Yes" : "No");
@@ -811,14 +1084,48 @@ string GetNewsStatusMessage() { return g_result.statusMessage; }
 int GetMinutesToNextNews() { return g_result.minutesToNextNews; }
 int GetUpcomingHighImpactCount() { return g_result.upcomingHighCount; }
 
-// Check if should close positions before news
+// Check if should close positions before news (hours before for high impact)
 bool ShouldCloseBeforeNews()
 {
    if(!InpCloseBeforeNews) return false;
-   if(g_result.tradingStatus == TRADING_BLOCKED_BEFORE &&
-      g_result.minutesToNextNews <= 5)  // Close 5 min before
+
+   // Only close for high impact news
+   if(g_result.nextEvent.impact != IMPACT_HIGH) return false;
+
+   // Close X hours before high impact news
+   int closeMinutesBefore = InpCloseHoursBefore * 60;
+   if(g_result.minutesToNextNews <= closeMinutesBefore &&
+      g_result.minutesToNextNews > 0)
       return true;
+
    return false;
+}
+
+// Check if should partial close for medium impact
+bool ShouldPartialClose()
+{
+   if(!InpPartialCloseEnabled) return false;
+
+   // Only partial close for medium impact
+   if(g_result.nextEvent.impact != IMPACT_MEDIUM) return false;
+
+   // Partial close 30 min before medium impact
+   if(g_result.minutesToNextNews <= 30 && g_result.minutesToNextNews > 0)
+      return true;
+
+   return false;
+}
+
+// Get partial close percentage
+double GetPartialClosePercent()
+{
+   return InpPartialClosePercent;
+}
+
+// Get current event risk score
+int GetCurrentRiskScore()
+{
+   return g_result.currentRiskScore;
 }
 
 // Get next news event details
