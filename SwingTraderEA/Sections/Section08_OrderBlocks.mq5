@@ -1,15 +1,26 @@
 //+------------------------------------------------------------------+
 //|                                       Section08_OrderBlocks.mq5  |
 //|                                      SwingTrader Pro EA          |
-//|                Section 8: Order Blocks + Volume Profile (v2.00)  |
+//|                Section 8: Order Blocks + Volume Profile (v2.01)  |
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "2.00"
-#property description "Section 8: Order Blocks & Volume Profile v2.00"
+#property version   "2.01"
+#property description "Section 8: Order Blocks & Volume Profile v2.01"
 #property description "Identifies institutional order blocks with scoring"
 #property description "Volume validation, ATR thresholds, retest limits"
 #property description "HVN/LVN identification for liquidity analysis"
+
+//+------------------------------------------------------------------+
+//| Modification History                                              |
+//+------------------------------------------------------------------+
+// 2025.12.25 v2.01 - Loosened OB detection criteria:
+//                    - InpMinMoveMultiple: 2 → 1
+//                    - InpRequireVolume: true → false
+//                    - InpVolumeMultiplier: 1.2 → 1.0
+//                    - Fixed duplicate struct error (OrderBlockV2, VolumeLevelV2)
+// 2025.12.23 v2.00 - Initial release with scoring and volume validation
+//+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
 //| Include Files                                                     |
