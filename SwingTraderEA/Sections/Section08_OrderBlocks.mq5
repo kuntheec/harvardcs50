@@ -30,11 +30,11 @@ input double   InpMaxOBSizePips       = 200.0;    // Max OB Size (pips) - if ATR
 input ENUM_TIMEFRAMES InpOBTimeframe  = PERIOD_H4; // Order Block Timeframe
 
 input group "=== Order Block Validation ==="
-input int      InpMinMoveMultiple     = 2;        // Min Move Multiple (xOB size)
+input int      InpMinMoveMultiple     = 1;        // Min Move Multiple (xOB size) - loosened from 2
 input bool     InpRequireImpulse      = true;     // Require Impulse Move
 input int      InpImpulseCandles      = 3;        // Impulse Within N Candles
-input bool     InpRequireVolume       = true;     // Require Above-Average Volume
-input double   InpVolumeMultiplier    = 1.2;      // Volume Multiplier (vs average)
+input bool     InpRequireVolume       = false;    // Require Above-Average Volume - disabled for more OBs
+input double   InpVolumeMultiplier    = 1.0;      // Volume Multiplier (vs average) - loosened from 1.2
 input int      InpVolumeAvgPeriod     = 20;       // Volume Average Period
 
 input group "=== Order Block Mitigation ==="
