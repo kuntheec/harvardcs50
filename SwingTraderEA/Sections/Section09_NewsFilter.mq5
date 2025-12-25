@@ -101,7 +101,7 @@ enum ENUM_TRADING_STATUS
 //+------------------------------------------------------------------+
 //| Structures                                                        |
 //+------------------------------------------------------------------+
-struct NewsEvent
+struct NewsEventV2
 {
    string            name;           // Event name
    string            currency;       // Affected currency
@@ -117,8 +117,8 @@ struct NewsFilterResult
 {
    ENUM_TRADING_STATUS tradingStatus;
    bool              tradingAllowed;
-   NewsEvent         nextEvent;          // Next upcoming event
-   NewsEvent         currentEvent;       // Current/recent event affecting trading
+   NewsEventV2       nextEvent;          // Next upcoming event
+   NewsEventV2       currentEvent;       // Current/recent event affecting trading
    int               minutesToNextNews;  // Minutes until next news
    int               minutesSinceLastNews; // Minutes since last news
    int               upcomingHighCount;  // High impact events in next 24h
@@ -134,7 +134,7 @@ struct NewsFilterResult
 //| Global Variables                                                  |
 //+------------------------------------------------------------------+
 // News events array
-NewsEvent         g_newsEvents[];
+NewsEventV2       g_newsEvents[];
 int               g_newsEventCount;
 
 // Analysis result
