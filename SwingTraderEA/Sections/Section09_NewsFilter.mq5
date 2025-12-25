@@ -965,8 +965,8 @@ void UpdatePanel()
    if(!InpShowPanel) return;
 
    // Status
-   string statusStr;
-   color statusColor;
+   string statusStr = "UNKNOWN";
+   color statusColor = clrGray;    // Default if status unknown
    switch(g_result.tradingStatus)
    {
       case TRADING_ALLOWED:
