@@ -5,14 +5,22 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.00"
-#property description "Section 11: SMC Entry Logic v1.00"
+#property version   "1.02"
+#property description "Section 11: SMC Entry Logic v1.02"
 #property description "Combines all sections for confluence-based entries"
 #property description "OTE zones, FVG fills, Order Block retests"
 
 //+------------------------------------------------------------------+
 //| Modification History                                              |
 //+------------------------------------------------------------------+
+// 2025.12.26 v1.02 - Added Crypto (BTC) support and user overrides:
+//                    - Crypto profile (RSI 80/20, extreme ATR thresholds)
+//                    - User override inputs for backtesting variants
+//                    - Enhanced PrintInitReport with profile details
+// 2025.12.25 v1.01 - Added InstrumentProfile integration:
+//                    - Uses centralized InstrumentProfile from CommonStructures
+//                    - Auto-adjusts RSI/ATR/Spread thresholds by instrument
+//                    - Gold/Silver/JPY/Forex automatic detection
 // 2025.12.25 v1.00 - Initial release with SMC entry logic:
 //                    - 10-point confluence scoring system
 //                    - OTE (Optimal Trade Entry) zone detection
@@ -50,6 +58,13 @@ input group "=== Risk Filter Settings ==="
 input bool     InpCheckNewsFilter     = true;       // Check News Before Entry
 input bool     InpCheckATRFilter      = true;       // Check ATR Conditions
 input double   InpMaxSpreadPips       = 5.0;        // Maximum Spread (pips)
+
+input group "=== Profile Override Settings (Backtesting) ==="
+input bool     InpUseProfileOverride  = false;      // Override Auto-Detection
+input int      InpOverrideRSIUpper    = 0;          // Override RSI Upper (0=auto)
+input int      InpOverrideRSILower    = 0;          // Override RSI Lower (0=auto)
+input double   InpOverrideATRQuiet    = 0;          // Override ATR Quiet (0=auto)
+input double   InpOverrideATRExtreme  = 0;          // Override ATR Extreme (0=auto)
 
 input group "=== Timing Settings ==="
 input int      InpSignalValidityMins  = 60;         // Signal Validity (minutes)
@@ -153,6 +168,7 @@ struct EntrySignalV2
 //+------------------------------------------------------------------+
 // Symbol info
 SymbolInfoCache   g_symbolInfo;
+InstrumentProfile g_profile;      // Centralized instrument settings
 int               g_digits;
 double            g_point;
 
@@ -180,6 +196,24 @@ int OnInit()
    InitSymbolInfo(g_symbolInfo, _Symbol);
    g_digits = g_symbolInfo.digits;
    g_point = g_symbolInfo.point;
+
+   // Get instrument profile (auto-adjusts settings for Gold/Forex/Crypto/etc)
+   g_profile = GetInstrumentProfile(g_symbolInfo);
+
+   // Apply user overrides if enabled (for backtesting variants)
+   if(InpUseProfileOverride)
+   {
+      if(InpOverrideRSIUpper > 0) g_profile.rsiUpper = InpOverrideRSIUpper;
+      if(InpOverrideRSILower > 0) g_profile.rsiLower = InpOverrideRSILower;
+      if(InpOverrideATRQuiet > 0) g_profile.atrQuiet = InpOverrideATRQuiet;
+      if(InpOverrideATRExtreme > 0) g_profile.atrExtreme = InpOverrideATRExtreme;
+      Print("USER OVERRIDE ACTIVE - Custom profile settings applied");
+   }
+
+   Print("INSTRUMENT PROFILE: ", g_profile.instrumentType,
+         " | RSI: ", g_profile.rsiLower, "/", g_profile.rsiUpper,
+         " | ATR: ", DoubleToString(g_profile.atrQuiet, 0), "-", DoubleToString(g_profile.atrExtreme, 0), " pips",
+         " | Max Spread: ", DoubleToString(g_profile.maxSpreadPips, 1), " pips");
 
    // Print initialization
    PrintInitReport();
@@ -248,11 +282,13 @@ void AnalyzeEntry()
    g_currentSpread = (g_currentAsk - g_currentBid) / g_symbolInfo.pipSize;
    g_signal.currentPrice = g_currentBid;
 
-   // Check spread filter
-   g_signal.spreadOK = (g_currentSpread <= InpMaxSpreadPips);
+   // Check spread filter (using profile or input override)
+   double maxSpread = (InpMaxSpreadPips > 0) ? InpMaxSpreadPips : g_profile.maxSpreadPips;
+   g_signal.spreadOK = IsSpreadAcceptable(g_currentSpread, g_profile) || (g_currentSpread <= maxSpread);
    if(!g_signal.spreadOK)
    {
-      g_signal.reason = "Spread too high: " + DoubleToString(g_currentSpread, 1) + " pips";
+      g_signal.reason = "Spread too high: " + DoubleToString(g_currentSpread, 1) +
+                        " pips (max: " + DoubleToString(g_profile.maxSpreadPips, 1) + ")";
       if(InpPrintReport) PrintEntryReport();
       return;
    }
@@ -471,29 +507,30 @@ bool CheckStructureBreak()
 //+------------------------------------------------------------------+
 bool CheckEMATrend()
 {
-   int ema50Handle = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_EMA, PRICE_CLOSE);
-   int ema200Handle = iMA(_Symbol, PERIOD_H1, 200, 0, MODE_EMA, PRICE_CLOSE);
+   // Use profile EMA periods (consistent: 50/200)
+   int emaFastHandle = iMA(_Symbol, PERIOD_H1, g_profile.emaFast, 0, MODE_EMA, PRICE_CLOSE);
+   int emaSlowHandle = iMA(_Symbol, PERIOD_H1, g_profile.emaSlow, 0, MODE_EMA, PRICE_CLOSE);
 
-   if(ema50Handle == INVALID_HANDLE || ema200Handle == INVALID_HANDLE)
+   if(emaFastHandle == INVALID_HANDLE || emaSlowHandle == INVALID_HANDLE)
       return false;
 
    double buffer[];
    ArraySetAsSeries(buffer, true);
 
-   double ema50, ema200;
+   double emaFast, emaSlow;
 
-   if(CopyBuffer(ema50Handle, 0, 0, 1, buffer) < 1) return false;
-   ema50 = buffer[0];
+   if(CopyBuffer(emaFastHandle, 0, 0, 1, buffer) < 1) return false;
+   emaFast = buffer[0];
 
-   if(CopyBuffer(ema200Handle, 0, 0, 1, buffer) < 1) return false;
-   ema200 = buffer[0];
+   if(CopyBuffer(emaSlowHandle, 0, 0, 1, buffer) < 1) return false;
+   emaSlow = buffer[0];
 
-   IndicatorRelease(ema50Handle);
-   IndicatorRelease(ema200Handle);
+   IndicatorRelease(emaFastHandle);
+   IndicatorRelease(emaSlowHandle);
 
    // Price above both EMAs = bullish, below both = bearish
-   bool bullish = (g_currentBid > ema50 && g_currentBid > ema200 && ema50 > ema200);
-   bool bearish = (g_currentBid < ema50 && g_currentBid < ema200 && ema50 < ema200);
+   bool bullish = (g_currentBid > emaFast && g_currentBid > emaSlow && emaFast > emaSlow);
+   bool bearish = (g_currentBid < emaFast && g_currentBid < emaSlow && emaFast < emaSlow);
 
    return (bullish || bearish);
 }
@@ -680,7 +717,7 @@ bool CheckAtSDZone()
 //+------------------------------------------------------------------+
 bool CheckRSIConfirm()
 {
-   int rsiHandle = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE);
+   int rsiHandle = iRSI(_Symbol, PERIOD_H1, g_profile.rsiPeriod, PRICE_CLOSE);
 
    if(rsiHandle == INVALID_HANDLE)
       return false;
@@ -697,12 +734,14 @@ bool CheckRSIConfirm()
    double rsi = buffer[0];
    IndicatorRelease(rsiHandle);
 
-   // RSI between 40-60 is neutral (pullback zone)
-   // For entry, we want RSI not at extremes
-   bool validForBuy = (rsi > 30 && rsi < 70);
-   bool validForSell = (rsi > 30 && rsi < 70);
+   // Use profile-based RSI levels (auto-adjusted for Gold/Forex)
+   // RSI should not be at extremes (overbought/oversold)
+   // For entry, we want RSI in acceptable range
+   bool notOverbought = !IsRSIOverbought(rsi, g_profile);
+   bool notOversold = !IsRSIOversold(rsi, g_profile);
 
-   return (validForBuy || validForSell);
+   // Valid entry when RSI is not at extremes
+   return (notOverbought && notOversold);
 }
 
 //+------------------------------------------------------------------+
@@ -766,8 +805,9 @@ bool CheckATRCondition()
    // Convert to pips
    double atrPips = atr / g_symbolInfo.pipSize;
 
+   // Use profile-based ATR thresholds (auto-adjusted for Gold/Forex)
    // Check if in normal range (not too quiet, not extreme)
-   g_signal.atrOK = (atrPips >= 60 && atrPips <= 300);
+   g_signal.atrOK = IsMarketNormal(atrPips, g_profile);
 
    return g_signal.atrOK;
 }
@@ -966,12 +1006,12 @@ void PrintEntryReport()
 {
    Print("");
    Print("=================================================");
-   Print("     ENTRY LOGIC ANALYSIS (Section 11 v1.00)     ");
+   Print("     ENTRY LOGIC ANALYSIS (Section 11 v1.02)     ");
    Print("=================================================");
-   Print("Symbol: ", _Symbol, " (", g_symbolInfo.isGold ? "GOLD" : "FOREX", ")");
+   Print("Symbol: ", _Symbol, " (", g_profile.instrumentType, ")");
    Print("Analysis Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
    Print("Current Bid: ", DoubleToString(g_currentBid, g_digits));
-   Print("Current Spread: ", DoubleToString(g_currentSpread, 1), " pips");
+   Print("Current Spread: ", DoubleToString(g_currentSpread, 1), " pips (max: ", DoubleToString(g_profile.maxSpreadPips, 1), ")");
    Print("-------------------------------------------------");
 
    Print("CONFLUENCE BREAKDOWN:");
@@ -1022,13 +1062,24 @@ void PrintInitReport()
 {
    Print("");
    Print("=================================================");
-   Print("     SWING TRADER PRO - SECTION 11 (v1.00)       ");
+   Print("     SWING TRADER PRO - SECTION 11 (v1.02)       ");
    Print("     SMC ENTRY LOGIC                             ");
    Print("=================================================");
    Print("Initialization Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
    Print("-------------------------------------------------");
    Print("SYMBOL: ", _Symbol);
-   Print("Instrument: ", g_symbolInfo.isGold ? "GOLD" : g_symbolInfo.isSilver ? "SILVER" : "FOREX");
+   Print("Instrument Type: ", g_profile.instrumentType);
+   Print("-------------------------------------------------");
+   Print("INSTRUMENT PROFILE (", InpUseProfileOverride ? "OVERRIDE" : "AUTO-DETECTED", "):");
+   Print("  RSI Period: ", g_profile.rsiPeriod);
+   Print("  RSI Levels: ", g_profile.rsiLower, " / ", g_profile.rsiUpper);
+   Print("  RSI Neutral: ", g_profile.rsiNeutralLower, " - ", g_profile.rsiNeutralUpper);
+   Print("  ATR Quiet: < ", DoubleToString(g_profile.atrQuiet, 0), " pips");
+   Print("  ATR Normal: ", DoubleToString(g_profile.atrQuiet, 0), " - ", DoubleToString(g_profile.atrExtreme, 0), " pips");
+   Print("  ATR Extreme: > ", DoubleToString(g_profile.atrExtreme, 0), " pips");
+   Print("  EMA Fast/Slow: ", g_profile.emaFast, " / ", g_profile.emaSlow);
+   Print("  Max Spread: ", DoubleToString(g_profile.maxSpreadPips, 1), " pips");
+   Print("  Zone Range: ", DoubleToString(g_profile.minZonePips, 0), " - ", DoubleToString(g_profile.maxZonePips, 0), " pips");
    Print("-------------------------------------------------");
    Print("ENTRY SETTINGS:");
    Print("  Min Confluence: ", InpMinConfluence, "/10");
@@ -1038,7 +1089,7 @@ void PrintInitReport()
    Print("-------------------------------------------------");
    Print("OTE ZONE SETTINGS:");
    Print("  Use OTE: ", InpUseOTEZone ? "Enabled" : "Disabled");
-   Print("  OTE Range: ", DoubleToString(InpOTEUpperFib, 1), "% - ", DoubleToString(InpOTELowerFib, 1), "%");
+   Print("  OTE Range: ", DoubleToString(g_profile.oteUpperFib, 1), "% - ", DoubleToString(g_profile.oteLowerFib, 1), "%");
    Print("-------------------------------------------------");
    Print("ENTRY TRIGGERS:");
    Print("  FVG Entry: ", InpUseFVGEntry ? "Enabled" : "Disabled");
@@ -1048,7 +1099,16 @@ void PrintInitReport()
    Print("RISK FILTERS:");
    Print("  News Filter: ", InpCheckNewsFilter ? "Enabled" : "Disabled");
    Print("  ATR Filter: ", InpCheckATRFilter ? "Enabled" : "Disabled");
-   Print("  Max Spread: ", DoubleToString(InpMaxSpreadPips, 1), " pips");
+   Print("  Max Spread: ", DoubleToString(g_profile.maxSpreadPips, 1), " pips");
+   if(InpUseProfileOverride)
+   {
+      Print("-------------------------------------------------");
+      Print("USER OVERRIDES ACTIVE:");
+      if(InpOverrideRSIUpper > 0) Print("  RSI Upper: ", InpOverrideRSIUpper);
+      if(InpOverrideRSILower > 0) Print("  RSI Lower: ", InpOverrideRSILower);
+      if(InpOverrideATRQuiet > 0) Print("  ATR Quiet: ", DoubleToString(InpOverrideATRQuiet, 0));
+      if(InpOverrideATRExtreme > 0) Print("  ATR Extreme: ", DoubleToString(InpOverrideATRExtreme, 0));
+   }
    Print("=================================================");
    Print("");
 }

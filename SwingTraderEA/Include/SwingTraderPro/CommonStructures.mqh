@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.10"
+#property version   "1.20"
 
 //+------------------------------------------------------------------+
 //| Enumerations                                                      |
@@ -116,6 +116,7 @@ struct SymbolInfoCache
    bool              isGold;             // Is Gold/XAU pair
    bool              isSilver;           // Is Silver/XAG pair
    bool              isJPY;              // Is JPY pair
+   bool              isCrypto;           // Is Crypto (BTC, ETH, etc.)
 };
 
 // ATR Filter Result
@@ -511,7 +512,7 @@ string CrossoverTypeToString(ENUM_CROSSOVER_TYPE cross)
 
 //+------------------------------------------------------------------+
 //| Initialize Symbol Info Cache                                      |
-//| Properly detects Gold/Silver/JPY and sets pip size                |
+//| Properly detects Gold/Silver/JPY/Crypto and sets pip size         |
 //+------------------------------------------------------------------+
 void InitSymbolInfo(SymbolInfoCache &info, string symbol)
 {
@@ -534,6 +535,11 @@ void InitSymbolInfo(SymbolInfoCache &info, string symbol)
    // Detect JPY pairs
    info.isJPY = (StringFind(sym, "JPY") >= 0);
 
+   // Detect Crypto (BTC, ETH, LTC, XRP, etc.)
+   info.isCrypto = (StringFind(sym, "BTC") >= 0 || StringFind(sym, "ETH") >= 0 ||
+                    StringFind(sym, "LTC") >= 0 || StringFind(sym, "XRP") >= 0 ||
+                    StringFind(sym, "BITCOIN") >= 0 || StringFind(sym, "CRYPTO") >= 0);
+
    // Set pip size based on instrument type
    if(info.isGold)
    {
@@ -542,6 +548,11 @@ void InitSymbolInfo(SymbolInfoCache &info, string symbol)
    else if(info.isSilver)
    {
       info.pipSize = 0.01;  // Silver: 1 pip = $0.01
+   }
+   else if(info.isCrypto)
+   {
+      // Crypto: varies by pair, typically 1.0 for BTC
+      info.pipSize = 1.0;
    }
    else if(info.isJPY)
    {
@@ -575,5 +586,210 @@ double PipsToPoints(const SymbolInfoCache &info, double pips)
       return pips * info.pipSize;
    else
       return pips * info.point;
+}
+
+//+------------------------------------------------------------------+
+//| Instrument Profile Structure                                      |
+//| Centralized settings that auto-adjust by instrument type          |
+//+------------------------------------------------------------------+
+struct InstrumentProfile
+{
+   // Instrument identification
+   string            instrumentType;     // GOLD, SILVER, JPY, FOREX
+
+   // RSI Settings (dynamic by volatility)
+   int               rsiPeriod;          // RSI period (consistent: 14)
+   int               rsiUpper;           // Overbought level
+   int               rsiLower;           // Oversold level
+   int               rsiNeutralUpper;    // Upper neutral zone
+   int               rsiNeutralLower;    // Lower neutral zone
+
+   // ATR Thresholds (for market condition)
+   double            atrQuiet;           // Below = too quiet, skip
+   double            atrNormal;          // Normal trading range
+   double            atrExtreme;         // Above = extreme volatility
+
+   // Zone Sizes (S/D, OB, FVG)
+   double            minZonePips;        // Minimum zone size
+   double            maxZonePips;        // Maximum zone size
+   double            zoneBufferATR;      // Zone buffer as ATR multiplier
+
+   // EMA Settings (consistent across instruments)
+   int               emaFast;            // Fast EMA (50)
+   int               emaSlow;            // Slow EMA (200)
+
+   // Spread limits
+   double            maxSpreadPips;      // Maximum acceptable spread
+
+   // Fibonacci OTE zone
+   double            oteUpperFib;        // OTE upper (61.8%)
+   double            oteLowerFib;        // OTE lower (78.6%)
+};
+
+//+------------------------------------------------------------------+
+//| Get Instrument Profile based on SymbolInfoCache                   |
+//| Returns optimized settings for the detected instrument type       |
+//+------------------------------------------------------------------+
+InstrumentProfile GetInstrumentProfile(const SymbolInfoCache &info)
+{
+   InstrumentProfile p;
+
+   // === CONSISTENT SETTINGS (same for all instruments) ===
+   p.rsiPeriod = 14;           // Industry standard
+   p.emaFast = 50;             // Standard fast EMA
+   p.emaSlow = 200;            // Standard slow EMA
+   p.oteUpperFib = 61.8;       // OTE zone upper
+   p.oteLowerFib = 78.6;       // OTE zone lower
+   p.zoneBufferATR = 0.2;      // 20% ATR buffer for zones
+
+   // === DYNAMIC SETTINGS (vary by instrument) ===
+   if(info.isCrypto)
+   {
+      p.instrumentType = "CRYPTO";
+      // RSI: Very wide levels for extreme volatility
+      p.rsiUpper = 80;         // Crypto can run further
+      p.rsiLower = 20;
+      p.rsiNeutralUpper = 65;
+      p.rsiNeutralLower = 35;
+      // ATR: Very high thresholds for Crypto volatility
+      p.atrQuiet = 500;        // BTC < 500 = quiet
+      p.atrNormal = 2000;      // Normal around 1000-2000
+      p.atrExtreme = 5000;     // BTC > 5000 = extreme
+      // Zones: Very large for Crypto
+      p.minZonePips = 100;
+      p.maxZonePips = 2000;
+      // Spread: Crypto typically has variable spread
+      p.maxSpreadPips = 50.0;
+   }
+   else if(info.isGold)
+   {
+      p.instrumentType = "GOLD";
+      // RSI: Wider levels for high volatility
+      p.rsiUpper = 75;
+      p.rsiLower = 25;
+      p.rsiNeutralUpper = 60;
+      p.rsiNeutralLower = 40;
+      // ATR: Much higher thresholds for Gold
+      p.atrQuiet = 100;        // Gold < 100 pips = quiet
+      p.atrNormal = 250;       // Normal around 150-250
+      p.atrExtreme = 500;      // Gold > 500 = extreme
+      // Zones: Larger for Gold volatility
+      p.minZonePips = 20;
+      p.maxZonePips = 300;
+      // Spread: Gold typically has wider spread
+      p.maxSpreadPips = 5.0;
+   }
+   else if(info.isSilver)
+   {
+      p.instrumentType = "SILVER";
+      // RSI: Slightly wider than Forex
+      p.rsiUpper = 73;
+      p.rsiLower = 27;
+      p.rsiNeutralUpper = 58;
+      p.rsiNeutralLower = 42;
+      // ATR: Silver is volatile but less than Gold
+      p.atrQuiet = 50;
+      p.atrNormal = 150;
+      p.atrExtreme = 300;
+      // Zones
+      p.minZonePips = 15;
+      p.maxZonePips = 200;
+      // Spread
+      p.maxSpreadPips = 4.0;
+   }
+   else if(info.isJPY)
+   {
+      p.instrumentType = "JPY";
+      // RSI: Standard levels
+      p.rsiUpper = 70;
+      p.rsiLower = 30;
+      p.rsiNeutralUpper = 55;
+      p.rsiNeutralLower = 45;
+      // ATR: JPY pairs moderate volatility
+      p.atrQuiet = 40;
+      p.atrNormal = 100;
+      p.atrExtreme = 200;
+      // Zones
+      p.minZonePips = 10;
+      p.maxZonePips = 150;
+      // Spread
+      p.maxSpreadPips = 3.0;
+   }
+   else  // Standard FOREX
+   {
+      p.instrumentType = "FOREX";
+      // RSI: Standard levels
+      p.rsiUpper = 70;
+      p.rsiLower = 30;
+      p.rsiNeutralUpper = 55;
+      p.rsiNeutralLower = 45;
+      // ATR: Standard Forex thresholds
+      p.atrQuiet = 30;
+      p.atrNormal = 80;
+      p.atrExtreme = 150;
+      // Zones
+      p.minZonePips = 5;
+      p.maxZonePips = 100;
+      // Spread
+      p.maxSpreadPips = 2.0;
+   }
+
+   return p;
+}
+
+//+------------------------------------------------------------------+
+//| Check if RSI is in overbought zone                                |
+//+------------------------------------------------------------------+
+bool IsRSIOverbought(double rsi, const InstrumentProfile &profile)
+{
+   return (rsi >= profile.rsiUpper);
+}
+
+//+------------------------------------------------------------------+
+//| Check if RSI is in oversold zone                                  |
+//+------------------------------------------------------------------+
+bool IsRSIOversold(double rsi, const InstrumentProfile &profile)
+{
+   return (rsi <= profile.rsiLower);
+}
+
+//+------------------------------------------------------------------+
+//| Check if RSI is in neutral zone (good for entries)                |
+//+------------------------------------------------------------------+
+bool IsRSINeutral(double rsi, const InstrumentProfile &profile)
+{
+   return (rsi >= profile.rsiNeutralLower && rsi <= profile.rsiNeutralUpper);
+}
+
+//+------------------------------------------------------------------+
+//| Check if ATR indicates quiet market                               |
+//+------------------------------------------------------------------+
+bool IsMarketQuiet(double atrPips, const InstrumentProfile &profile)
+{
+   return (atrPips < profile.atrQuiet);
+}
+
+//+------------------------------------------------------------------+
+//| Check if ATR indicates extreme volatility                         |
+//+------------------------------------------------------------------+
+bool IsMarketExtreme(double atrPips, const InstrumentProfile &profile)
+{
+   return (atrPips > profile.atrExtreme);
+}
+
+//+------------------------------------------------------------------+
+//| Check if ATR is in normal trading range                           |
+//+------------------------------------------------------------------+
+bool IsMarketNormal(double atrPips, const InstrumentProfile &profile)
+{
+   return (atrPips >= profile.atrQuiet && atrPips <= profile.atrExtreme);
+}
+
+//+------------------------------------------------------------------+
+//| Check if spread is acceptable                                     |
+//+------------------------------------------------------------------+
+bool IsSpreadAcceptable(double spreadPips, const InstrumentProfile &profile)
+{
+   return (spreadPips <= profile.maxSpreadPips);
 }
 //+------------------------------------------------------------------+
