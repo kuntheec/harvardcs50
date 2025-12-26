@@ -442,9 +442,9 @@ void CalculateConfluence()
 bool CheckMTFAlignment()
 {
    // Simulate MTF check using EMA on multiple timeframes
-   double ema50_H1 = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_EMA, PRICE_CLOSE);
-   double ema50_H4 = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_EMA, PRICE_CLOSE);
-   double ema50_D1 = iMA(_Symbol, PERIOD_D1, 50, 0, MODE_EMA, PRICE_CLOSE);
+   int ema50_H1 = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_EMA, PRICE_CLOSE);
+   int ema50_H4 = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_EMA, PRICE_CLOSE);
+   int ema50_D1 = iMA(_Symbol, PERIOD_D1, 50, 0, MODE_EMA, PRICE_CLOSE);
 
    if(ema50_H1 == INVALID_HANDLE || ema50_H4 == INVALID_HANDLE || ema50_D1 == INVALID_HANDLE)
       return false;
@@ -822,7 +822,7 @@ void DetermineEntryDirection()
    int bearishCount = 0;
 
    // MTF alignment direction
-   double ema50 = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_EMA, PRICE_CLOSE);
+   int ema50 = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_EMA, PRICE_CLOSE);
    if(ema50 != INVALID_HANDLE)
    {
       double buffer[];
