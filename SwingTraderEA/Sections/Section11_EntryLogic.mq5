@@ -1120,40 +1120,85 @@ void CreatePanel()
 {
    int x = InpPanelX;
    int y = InpPanelY;
-   int height = 320;
+   int height = 480;  // Increased height for more info
 
-   CreateRectangle(g_panelName + "_bg", x, y, 300, height, clrBlack, 200);
+   CreateRectangle(g_panelName + "_bg", x, y, 320, height, clrBlack, 200);
 
    CreateLabel(g_panelName + "_title", x + 10, y + 5,
-               "SMC ENTRY LOGIC v1.0", clrGold, 10, "Arial Bold");
+               "SMC ENTRY LOGIC v1.02", clrGold, 10, "Arial Bold");
 
    CreateLabel(g_panelName + "_sep1", x + 10, y + 25,
-               "--------------------------------", clrGray, 8, "Courier New");
+               "------------------------------------", clrGray, 8, "Courier New");
 
    int yOff = 40;
+
+   // Symbol & Instrument Type
+   CreateLabel(g_panelName + "_sym_label", x + 10, y + yOff, "Symbol:", clrWhite, 9, "Arial");
+   CreateLabel(g_panelName + "_sym_value", x + 100, y + yOff, _Symbol, clrGold, 9, "Arial Bold");
+   yOff += 18;
+
+   // Instrument Type
+   CreateLabel(g_panelName + "_inst_label", x + 10, y + yOff, "Type:", clrWhite, 9, "Arial");
+   CreateLabel(g_panelName + "_inst_value", x + 100, y + yOff, "--", clrYellow, 9, "Arial");
+   yOff += 18;
+
+   // Current Price
+   CreateLabel(g_panelName + "_price_label", x + 10, y + yOff, "Price:", clrWhite, 9, "Arial");
+   CreateLabel(g_panelName + "_price_value", x + 100, y + yOff, "--", clrCyan, 9, "Arial");
+   yOff += 18;
+
+   // Spread
+   CreateLabel(g_panelName + "_spread_label", x + 10, y + yOff, "Spread:", clrWhite, 9, "Arial");
+   CreateLabel(g_panelName + "_spread_value", x + 100, y + yOff, "--", clrYellow, 9, "Arial");
+   yOff += 22;
+
+   CreateLabel(g_panelName + "_sep2", x + 10, y + yOff,
+               "------------------------------------", clrGray, 8, "Courier New");
+   yOff += 15;
+
+   // Confluence Header
+   CreateLabel(g_panelName + "_conf_header", x + 10, y + yOff, "CONFLUENCE:", clrWhite, 9, "Arial Bold");
+   CreateLabel(g_panelName + "_conf_total", x + 200, y + yOff, "--/10", clrYellow, 9, "Arial Bold");
+   yOff += 18;
+
+   // Confluence checkboxes
+   CreateLabel(g_panelName + "_c1", x + 10, y + yOff, "[ ] MTF Align", clrGray, 8, "Courier New");
+   CreateLabel(g_panelName + "_c2", x + 160, y + yOff, "[ ] Structure", clrGray, 8, "Courier New");
+   yOff += 15;
+   CreateLabel(g_panelName + "_c3", x + 10, y + yOff, "[ ] EMA Trend", clrGray, 8, "Courier New");
+   CreateLabel(g_panelName + "_c4", x + 160, y + yOff, "[ ] OTE Zone", clrGray, 8, "Courier New");
+   yOff += 15;
+   CreateLabel(g_panelName + "_c5", x + 10, y + yOff, "[ ] FVG", clrGray, 8, "Courier New");
+   CreateLabel(g_panelName + "_c6", x + 160, y + yOff, "[ ] Order Block", clrGray, 8, "Courier New");
+   yOff += 15;
+   CreateLabel(g_panelName + "_c7", x + 10, y + yOff, "[ ] S/D Zone", clrGray, 8, "Courier New");
+   CreateLabel(g_panelName + "_c8", x + 160, y + yOff, "[ ] RSI", clrGray, 8, "Courier New");
+   yOff += 15;
+   CreateLabel(g_panelName + "_c9", x + 10, y + yOff, "[ ] MACD", clrGray, 8, "Courier New");
+   CreateLabel(g_panelName + "_c10", x + 160, y + yOff, "[ ] ATR OK", clrGray, 8, "Courier New");
+   yOff += 20;
+
+   CreateLabel(g_panelName + "_sep3", x + 10, y + yOff,
+               "------------------------------------", clrGray, 8, "Courier New");
+   yOff += 15;
 
    // Signal Type
    CreateLabel(g_panelName + "_type_label", x + 10, y + yOff, "Signal:", clrWhite, 9, "Arial");
    CreateLabel(g_panelName + "_type_value", x + 100, y + yOff, "--", clrYellow, 9, "Arial Bold");
-   yOff += 20;
-
-   // Confluence
-   CreateLabel(g_panelName + "_conf_label", x + 10, y + yOff, "Confluence:", clrWhite, 9, "Arial");
-   CreateLabel(g_panelName + "_conf_value", x + 100, y + yOff, "--/10", clrYellow, 9, "Arial");
-   yOff += 20;
+   yOff += 18;
 
    // Strength
    CreateLabel(g_panelName + "_str_label", x + 10, y + yOff, "Strength:", clrWhite, 9, "Arial");
    CreateLabel(g_panelName + "_str_value", x + 100, y + yOff, "--", clrGray, 9, "Arial");
-   yOff += 20;
+   yOff += 18;
 
    // Trigger
    CreateLabel(g_panelName + "_trig_label", x + 10, y + yOff, "Trigger:", clrWhite, 9, "Arial");
    CreateLabel(g_panelName + "_trig_value", x + 100, y + yOff, "--", clrGray, 8, "Arial");
-   yOff += 25;
+   yOff += 22;
 
-   CreateLabel(g_panelName + "_sep2", x + 10, y + yOff,
-               "--------------------------------", clrGray, 8, "Courier New");
+   CreateLabel(g_panelName + "_sep4", x + 10, y + yOff,
+               "------------------------------------", clrGray, 8, "Courier New");
    yOff += 15;
 
    // Entry Price
@@ -1174,15 +1219,15 @@ void CreatePanel()
    // TP2
    CreateLabel(g_panelName + "_tp2_label", x + 10, y + yOff, "TP2 (1:2):", clrLimeGreen, 9, "Arial");
    CreateLabel(g_panelName + "_tp2_value", x + 100, y + yOff, "--", clrLimeGreen, 9, "Arial");
-   yOff += 20;
+   yOff += 18;
 
    // R:R
    CreateLabel(g_panelName + "_rr_label", x + 10, y + yOff, "Risk:Reward:", clrWhite, 9, "Arial");
    CreateLabel(g_panelName + "_rr_value", x + 100, y + yOff, "--", clrYellow, 9, "Arial");
-   yOff += 25;
+   yOff += 22;
 
-   CreateLabel(g_panelName + "_sep3", x + 10, y + yOff,
-               "--------------------------------", clrGray, 8, "Courier New");
+   CreateLabel(g_panelName + "_sep5", x + 10, y + yOff,
+               "------------------------------------", clrGray, 8, "Courier New");
    yOff += 15;
 
    // Status
@@ -1191,11 +1236,53 @@ void CreatePanel()
 }
 
 //+------------------------------------------------------------------+
+//| Update Confluence Checkbox                                        |
+//+------------------------------------------------------------------+
+void UpdateConfluenceBox(string suffix, int value, string label)
+{
+   string text = (value > 0) ? "[X] " + label : "[ ] " + label;
+   color clr = (value > 0) ? clrLimeGreen : clrGray;
+   ObjectSetString(0, g_panelName + suffix, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, g_panelName + suffix, OBJPROP_COLOR, clr);
+}
+
+//+------------------------------------------------------------------+
 //| Update Panel                                                      |
 //+------------------------------------------------------------------+
 void UpdatePanel()
 {
    if(!InpShowPanel) return;
+
+   // Instrument Type
+   ObjectSetString(0, g_panelName + "_inst_value", OBJPROP_TEXT, g_profile.instrumentType);
+
+   // Current Price
+   ObjectSetString(0, g_panelName + "_price_value", OBJPROP_TEXT, DoubleToString(g_currentBid, g_digits));
+
+   // Spread with color coding
+   string spreadStr = DoubleToString(g_currentSpread, 1) + " pips";
+   color spreadColor = g_signal.spreadOK ? clrLimeGreen : clrRed;
+   ObjectSetString(0, g_panelName + "_spread_value", OBJPROP_TEXT, spreadStr);
+   ObjectSetInteger(0, g_panelName + "_spread_value", OBJPROP_COLOR, spreadColor);
+
+   // Confluence Total
+   ObjectSetString(0, g_panelName + "_conf_total", OBJPROP_TEXT,
+                   IntegerToString(g_signal.confluence.total) + "/10");
+   color confColor = (g_signal.confluence.total >= 8) ? clrLimeGreen :
+                     (g_signal.confluence.total >= 6) ? clrYellow : clrOrange;
+   ObjectSetInteger(0, g_panelName + "_conf_total", OBJPROP_COLOR, confColor);
+
+   // Update confluence checkboxes
+   UpdateConfluenceBox("_c1", g_signal.confluence.mtfAlignment, "MTF Align");
+   UpdateConfluenceBox("_c2", g_signal.confluence.structureBreak, "Structure");
+   UpdateConfluenceBox("_c3", g_signal.confluence.emaTrend, "EMA Trend");
+   UpdateConfluenceBox("_c4", g_signal.confluence.inOTEZone, "OTE Zone");
+   UpdateConfluenceBox("_c5", g_signal.confluence.atFVG, "FVG");
+   UpdateConfluenceBox("_c6", g_signal.confluence.atOrderBlock, "Order Block");
+   UpdateConfluenceBox("_c7", g_signal.confluence.atSDZone, "S/D Zone");
+   UpdateConfluenceBox("_c8", g_signal.confluence.rsiConfirm, "RSI");
+   UpdateConfluenceBox("_c9", g_signal.confluence.macdConfirm, "MACD");
+   UpdateConfluenceBox("_c10", g_signal.confluence.atrCondition, "ATR OK");
 
    // Signal Type
    string typeStr = EntryTypeToString(g_signal.type);
@@ -1206,13 +1293,12 @@ void UpdatePanel()
    ObjectSetString(0, g_panelName + "_type_value", OBJPROP_TEXT, typeStr);
    ObjectSetInteger(0, g_panelName + "_type_value", OBJPROP_COLOR, typeColor);
 
-   // Confluence
-   ObjectSetString(0, g_panelName + "_conf_value", OBJPROP_TEXT,
-                   IntegerToString(g_signal.confluence.total) + "/10");
-
    // Strength
-   ObjectSetString(0, g_panelName + "_str_value", OBJPROP_TEXT,
-                   SignalStrengthToString(g_signal.strength));
+   string strStr = SignalStrengthToString(g_signal.strength);
+   color strColor = (g_signal.strength == SIGNAL_STRONG) ? clrLimeGreen :
+                    (g_signal.strength == SIGNAL_MODERATE) ? clrYellow : clrGray;
+   ObjectSetString(0, g_panelName + "_str_value", OBJPROP_TEXT, strStr);
+   ObjectSetInteger(0, g_panelName + "_str_value", OBJPROP_COLOR, strColor);
 
    // Trigger
    ObjectSetString(0, g_panelName + "_trig_value", OBJPROP_TEXT,
@@ -1244,6 +1330,7 @@ void UpdatePanel()
    // Status
    string statusStr = g_signal.isValid ? "SIGNAL ACTIVE" : "NO SIGNAL";
    if(!g_signal.spreadOK) statusStr = "SPREAD HIGH";
+   if(g_signal.confluence.total < InpMinConfluence) statusStr = "LOW CONFLUENCE";
    color statusColor = g_signal.isValid ? InpBuyColor : InpNeutralColor;
    if(g_signal.type == ENTRY_SELL && g_signal.isValid) statusColor = InpSellColor;
 
