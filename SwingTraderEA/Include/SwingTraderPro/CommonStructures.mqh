@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.20"
+#property version   "1.30"
 
 //+------------------------------------------------------------------+
 //| Enumerations                                                      |
@@ -792,4 +792,253 @@ bool IsSpreadAcceptable(double spreadPips, const InstrumentProfile &profile)
 {
    return (spreadPips <= profile.maxSpreadPips);
 }
+
+//+------------------------------------------------------------------+
+//| Section Results Structure                                         |
+//| Shared data structure for inter-section communication             |
+//| Each section populates its results here for consolidation         |
+//+------------------------------------------------------------------+
+struct SectionResults
+{
+   // === Section 1: ATR Filter ===
+   ATRFilterResult       atr;
+   bool                  atrValid;
+
+   // === Section 2: EMA Analysis ===
+   EMAAnalysisResult     ema;
+   bool                  emaValid;
+
+   // === Section 3: Market Structure (BOS/CHoCH) ===
+   StructureBreak        latestBOS;
+   StructureBreak        latestCHoCH;
+   ENUM_TREND_BIAS       structureBias;
+   bool                  structureValid;
+
+   // === Section 4: Supply/Demand Zones ===
+   SDZone                activeZones[10];    // Up to 10 active zones
+   int                   activeZoneCount;
+   SDZone                nearestZone;        // Nearest to current price
+   bool                  priceAtZone;
+   bool                  sdValid;
+
+   // === Section 5: Fibonacci ===
+   FibAnalysis           fib;
+   bool                  priceInOTE;         // In 61.8-78.6% zone
+   double                nearestFibLevel;
+   bool                  fibValid;
+
+   // === Section 6: Momentum (RSI/MACD) ===
+   double                rsiValue;
+   double                macdMain;
+   double                macdSignal;
+   double                macdHistogram;
+   bool                  rsiOverbought;
+   bool                  rsiOversold;
+   bool                  macdBullish;
+   bool                  macdBearish;
+   bool                  momentumValid;
+
+   // === Section 7: Fair Value Gaps ===
+   FVGap                 activeFVGs[10];     // Up to 10 active FVGs
+   int                   activeFVGCount;
+   FVGap                 nearestFVG;         // Nearest to current price
+   bool                  priceAtFVG;
+   bool                  fvgValid;
+
+   // === Section 8: Order Blocks ===
+   OrderBlock            activeOBs[10];      // Up to 10 active OBs
+   int                   activeOBCount;
+   OrderBlock            nearestOB;          // Nearest to current price
+   bool                  priceAtOB;
+   bool                  obValid;
+
+   // === Section 9: News Filter ===
+   bool                  newsImpactHigh;     // High-impact news nearby
+   bool                  newsImpactMedium;
+   int                   minutesToNews;      // Minutes until next news
+   bool                  tradingAllowed;     // News filter allows trading
+   bool                  newsValid;
+
+   // === Section 10: MTF Analysis ===
+   ENUM_TREND_BIAS       h4Bias;
+   ENUM_TREND_BIAS       h1Bias;
+   ENUM_TREND_BIAS       m15Bias;
+   ENUM_TREND_BIAS       overallBias;
+   int                   mtfScore;           // Combined MTF score
+   bool                  mtfAligned;         // All timeframes aligned
+   bool                  mtfValid;
+
+   // === Combined Results ===
+   ENUM_TREND_BIAS       masterBias;         // Final consolidated bias
+   int                   confluenceScore;    // 0-10 score
+   bool                  entryReady;         // All conditions met for entry
+
+   // === Timestamps ===
+   datetime              lastUpdateTime;
+   datetime              section1Time;
+   datetime              section2Time;
+   datetime              section3Time;
+   datetime              section4Time;
+   datetime              section5Time;
+   datetime              section6Time;
+   datetime              section7Time;
+   datetime              section8Time;
+   datetime              section9Time;
+   datetime              section10Time;
+};
+
+//+------------------------------------------------------------------+
+//| Initialize Section Results to Default Values                      |
+//+------------------------------------------------------------------+
+void InitSectionResults(SectionResults &results)
+{
+   // Reset all validity flags
+   results.atrValid = false;
+   results.emaValid = false;
+   results.structureValid = false;
+   results.sdValid = false;
+   results.fibValid = false;
+   results.momentumValid = false;
+   results.fvgValid = false;
+   results.obValid = false;
+   results.newsValid = false;
+   results.mtfValid = false;
+
+   // Reset counts
+   results.activeZoneCount = 0;
+   results.activeFVGCount = 0;
+   results.activeOBCount = 0;
+
+   // Reset flags
+   results.priceAtZone = false;
+   results.priceInOTE = false;
+   results.priceAtFVG = false;
+   results.priceAtOB = false;
+   results.newsImpactHigh = false;
+   results.newsImpactMedium = false;
+   results.tradingAllowed = true;
+   results.mtfAligned = false;
+   results.entryReady = false;
+
+   // Reset scores
+   results.mtfScore = 0;
+   results.confluenceScore = 0;
+
+   // Reset biases
+   results.structureBias = BIAS_NEUTRAL;
+   results.h4Bias = BIAS_NEUTRAL;
+   results.h1Bias = BIAS_NEUTRAL;
+   results.m15Bias = BIAS_NEUTRAL;
+   results.overallBias = BIAS_NEUTRAL;
+   results.masterBias = BIAS_NEUTRAL;
+
+   // Reset timestamps
+   results.lastUpdateTime = 0;
+   results.section1Time = 0;
+   results.section2Time = 0;
+   results.section3Time = 0;
+   results.section4Time = 0;
+   results.section5Time = 0;
+   results.section6Time = 0;
+   results.section7Time = 0;
+   results.section8Time = 0;
+   results.section9Time = 0;
+   results.section10Time = 0;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Confluence Score from Section Results                   |
+//| Returns 0-10 score based on how many conditions are met           |
+//+------------------------------------------------------------------+
+int CalculateConfluenceFromResults(const SectionResults &results)
+{
+   int score = 0;
+
+   // 1. ATR conditions OK (not quiet, not extreme)
+   if(results.atrValid && results.atr.tradingAllowed)
+      score++;
+
+   // 2. EMA trend aligned
+   if(results.emaValid && results.ema.trend != BIAS_NEUTRAL)
+      score++;
+
+   // 3. Structure break confirmed
+   if(results.structureValid &&
+      (results.latestBOS.type != STRUCTURE_NONE || results.latestCHoCH.type != STRUCTURE_NONE))
+      score++;
+
+   // 4. Price at S/D zone
+   if(results.sdValid && results.priceAtZone)
+      score++;
+
+   // 5. Price in OTE zone
+   if(results.fibValid && results.priceInOTE)
+      score++;
+
+   // 6. RSI confirms (not extreme)
+   if(results.momentumValid && !results.rsiOverbought && !results.rsiOversold)
+      score++;
+
+   // 7. MACD aligned with bias
+   if(results.momentumValid && (results.macdBullish || results.macdBearish))
+      score++;
+
+   // 8. Price at FVG
+   if(results.fvgValid && results.priceAtFVG)
+      score++;
+
+   // 9. Price at Order Block
+   if(results.obValid && results.priceAtOB)
+      score++;
+
+   // 10. MTF aligned
+   if(results.mtfValid && results.mtfAligned)
+      score++;
+
+   return score;
+}
+
+//+------------------------------------------------------------------+
+//| Check if Entry Conditions are Met                                 |
+//+------------------------------------------------------------------+
+bool IsEntryReady(const SectionResults &results, int minConfluence = 6)
+{
+   // Must have valid data from key sections
+   if(!results.atrValid || !results.emaValid || !results.mtfValid)
+      return false;
+
+   // News must allow trading
+   if(results.newsValid && !results.tradingAllowed)
+      return false;
+
+   // ATR must allow trading
+   if(!results.atr.tradingAllowed)
+      return false;
+
+   // Confluence must meet minimum
+   if(results.confluenceScore < minConfluence)
+      return false;
+
+   // Must have a clear bias
+   if(results.masterBias == BIAS_NEUTRAL)
+      return false;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Get Signal Strength from Confluence Score                         |
+//+------------------------------------------------------------------+
+ENUM_SIGNAL_STRENGTH GetStrengthFromConfluence(int confluenceScore)
+{
+   if(confluenceScore >= 8)
+      return SIGNAL_STRONG;
+   else if(confluenceScore >= 6)
+      return SIGNAL_MODERATE;
+   else if(confluenceScore >= 4)
+      return SIGNAL_WEAK;
+   else
+      return SIGNAL_NONE;
+}
+
 //+------------------------------------------------------------------+
