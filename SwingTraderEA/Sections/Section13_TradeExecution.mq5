@@ -16,6 +16,63 @@
 #include <Trade/OrderInfo.mqh>
 
 //+------------------------------------------------------------------+
+//| Enumerations (must be before inputs)                              |
+//+------------------------------------------------------------------+
+enum ENUM_ENTRY_MODE
+{
+   ENTRY_MARKET,          // Market Order
+   ENTRY_LIMIT,           // Limit Order
+   ENTRY_STOP             // Stop Order
+};
+
+enum ENUM_BE_TRIGGER
+{
+   BE_AFTER_TP1,          // After TP1 Hit
+   BE_AT_RR_1,            // At 1:1 Risk:Reward
+   BE_CUSTOM_POINTS       // Custom Points
+};
+
+enum ENUM_TRAIL_MODE
+{
+   TRAIL_NONE,            // No Trailing
+   TRAIL_ATR,             // ATR-Based
+   TRAIL_FIXED,           // Fixed Points
+   TRAIL_SMC_STRUCTURE,   // SMC Structure (BOS/Swings)
+   TRAIL_STEP             // Step Trail
+};
+
+enum ENUM_TRADE_DIRECTION
+{
+   TRADE_BUY,
+   TRADE_SELL
+};
+
+enum ENUM_INSTRUMENT_PROFILE
+{
+   PROFILE_FOREX,
+   PROFILE_GOLD,
+   PROFILE_SILVER,
+   PROFILE_CRYPTO,
+   PROFILE_INDEX,
+   PROFILE_OTHER
+};
+
+enum ENUM_CURRENCY_GROUP
+{
+   GROUP_USD,
+   GROUP_EUR,
+   GROUP_GBP,
+   GROUP_JPY,
+   GROUP_AUD,
+   GROUP_CAD,
+   GROUP_CHF,
+   GROUP_NZD,
+   GROUP_GOLD,
+   GROUP_CRYPTO,
+   GROUP_OTHER
+};
+
+//+------------------------------------------------------------------+
 //| Input Parameters                                                  |
 //+------------------------------------------------------------------+
 input group "=== SECTION 13: TRADE EXECUTION v1.01 (SMC) ==="
@@ -97,63 +154,6 @@ input bool     InpShowPanel           = true;              // Show Execution Pan
 input int      InpPanelX              = 10;                // Panel X Position
 input int      InpPanelY              = 400;               // Panel Y Position
 input color    InpPanelBg             = clrMidnightBlue;   // Panel Background
-
-//+------------------------------------------------------------------+
-//| Enumerations                                                      |
-//+------------------------------------------------------------------+
-enum ENUM_ENTRY_MODE
-{
-   ENTRY_MARKET,          // Market Order
-   ENTRY_LIMIT,           // Limit Order
-   ENTRY_STOP             // Stop Order
-};
-
-enum ENUM_BE_TRIGGER
-{
-   BE_AFTER_TP1,          // After TP1 Hit
-   BE_AT_RR_1,            // At 1:1 Risk:Reward
-   BE_CUSTOM_POINTS       // Custom Points
-};
-
-enum ENUM_TRAIL_MODE
-{
-   TRAIL_NONE,            // No Trailing
-   TRAIL_ATR,             // ATR-Based
-   TRAIL_FIXED,           // Fixed Points
-   TRAIL_SMC_STRUCTURE,   // SMC Structure (BOS/Swings)
-   TRAIL_STEP             // Step Trail
-};
-
-enum ENUM_TRADE_DIRECTION
-{
-   TRADE_BUY,
-   TRADE_SELL
-};
-
-enum ENUM_INSTRUMENT_PROFILE
-{
-   PROFILE_FOREX,
-   PROFILE_GOLD,
-   PROFILE_SILVER,
-   PROFILE_CRYPTO,
-   PROFILE_INDEX,
-   PROFILE_OTHER
-};
-
-enum ENUM_CURRENCY_GROUP
-{
-   GROUP_USD,
-   GROUP_EUR,
-   GROUP_GBP,
-   GROUP_JPY,
-   GROUP_AUD,
-   GROUP_CAD,
-   GROUP_CHF,
-   GROUP_NZD,
-   GROUP_GOLD,
-   GROUP_CRYPTO,
-   GROUP_OTHER
-};
 
 //+------------------------------------------------------------------+
 //| Structures                                                        |
