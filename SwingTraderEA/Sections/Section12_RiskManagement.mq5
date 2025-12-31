@@ -593,31 +593,29 @@ double CalculatePositionRiskPercent(ulong ticket)
 //+------------------------------------------------------------------+
 void UpdateEdgeMetrics()
 {
-   EdgeMetrics &edge = g_riskMetrics.edge;
+   if(g_riskMetrics.edge.totalTrades > 0)
+      g_riskMetrics.edge.winrate = (double)g_riskMetrics.edge.winningTrades / g_riskMetrics.edge.totalTrades * 100;
 
-   if(edge.totalTrades > 0)
-      edge.winrate = (double)edge.winningTrades / edge.totalTrades * 100;
+   if(g_riskMetrics.edge.winningTrades > 0)
+      g_riskMetrics.edge.avgWinRR = g_riskMetrics.edge.totalRRWins / g_riskMetrics.edge.winningTrades;
+   if(g_riskMetrics.edge.losingTrades > 0)
+      g_riskMetrics.edge.avgLossRR = g_riskMetrics.edge.totalRRLosses / g_riskMetrics.edge.losingTrades;
 
-   if(edge.winningTrades > 0)
-      edge.avgWinRR = edge.totalRRWins / edge.winningTrades;
-   if(edge.losingTrades > 0)
-      edge.avgLossRR = edge.totalRRLosses / edge.losingTrades;
-
-   double winPct = edge.winrate / 100.0;
+   double winPct = g_riskMetrics.edge.winrate / 100.0;
    double lossPct = 1.0 - winPct;
-   edge.expectancy = (winPct * edge.avgWinRR) - (lossPct * edge.avgLossRR);
+   g_riskMetrics.edge.expectancy = (winPct * g_riskMetrics.edge.avgWinRR) - (lossPct * g_riskMetrics.edge.avgLossRR);
 
-   if(edge.totalTrades >= InpMinTradesForMetrics)
+   if(g_riskMetrics.edge.totalTrades >= InpMinTradesForMetrics)
    {
-      edge.hasEdge = (edge.winrate >= InpMinWinrateToTrade &&
-                      edge.avgWinRR >= InpMinAvgRRToTrade);
+      g_riskMetrics.edge.hasEdge = (g_riskMetrics.edge.winrate >= InpMinWinrateToTrade &&
+                                     g_riskMetrics.edge.avgWinRR >= InpMinAvgRRToTrade);
 
-      edge.edgeStatus = edge.hasEdge ? "EDGE CONFIRMED" : "NO EDGE - Review";
+      g_riskMetrics.edge.edgeStatus = g_riskMetrics.edge.hasEdge ? "EDGE CONFIRMED" : "NO EDGE - Review";
    }
    else
    {
-      edge.edgeStatus = "Collecting (" + IntegerToString(edge.totalTrades) +
-                        "/" + IntegerToString(InpMinTradesForMetrics) + ")";
+      g_riskMetrics.edge.edgeStatus = "Collecting (" + IntegerToString(g_riskMetrics.edge.totalTrades) +
+                                       "/" + IntegerToString(InpMinTradesForMetrics) + ")";
    }
 }
 
