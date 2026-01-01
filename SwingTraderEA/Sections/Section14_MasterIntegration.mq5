@@ -278,6 +278,18 @@ int OnInit()
    RunSMCAnalysis();
    Print("✓ Initial SMC Analysis Complete");
 
+   // Set initial status message based on trading mode
+   if(InpEAMode == MODE_ANALYSIS_ONLY)
+      g_status.statusMessage = "Analysis Mode";
+   else if(!g_analysis.sessionActive)
+      g_status.statusMessage = "Off Hours - Monitoring";
+   else
+      g_status.statusMessage = "Ready to Trade";
+
+   // Update panel with initial values
+   if(InpShowMasterPanel)
+      UpdatePanel();
+
    return INIT_SUCCEEDED;
 }
 
@@ -331,6 +343,19 @@ void OnTick()
          {
             ProcessSignal();
          }
+         else
+         {
+            // Update status when ready but no valid signal
+            g_status.statusMessage = "Scanning for Signals";
+         }
+      }
+      else if(InpEAMode == MODE_ANALYSIS_ONLY)
+      {
+         g_status.statusMessage = "Analysis Mode";
+      }
+      else if(!g_analysis.sessionActive)
+      {
+         g_status.statusMessage = "Off Hours - Monitoring";
       }
    }
 
