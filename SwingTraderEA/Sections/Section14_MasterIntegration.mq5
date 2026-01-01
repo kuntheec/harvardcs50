@@ -487,8 +487,10 @@ void PrintSMCDebug()
    Print("SEC 6 | Session: ", sessionStr, " | Active: ", g_analysis.sessionActive ? "YES" : "NO");
 
    // Section 7: FVG
-   Print("SEC 7 | BullFVG: ", g_analysis.bullishFVG ? "YES" : "NO",
-         " | BearFVG: ", g_analysis.bearishFVG ? "YES" : "NO");
+   Print("SEC 7 | Bullish: ", g_sectionResults.bullishFVGCount,
+         " | Bearish: ", g_sectionResults.bearishFVGCount,
+         " | Mitigated: ", g_sectionResults.mitigatedFVGCount);
+   Print("      | InFVG: ", g_analysis.bullishFVG || g_analysis.bearishFVG ? "YES" : "NO");
 
    // Section 8: Order Blocks
    Print("SEC 8 | BullOB: ", g_analysis.bullishOB ? "YES" : "NO",

@@ -85,6 +85,9 @@ struct SectionResults
    double            fvgLow;
    double            fvgMidpoint;
    int               fvgCount;
+   int               bullishFVGCount;      // Number of active bullish FVGs
+   int               bearishFVGCount;      // Number of active bearish FVGs
+   int               mitigatedFVGCount;    // Number of mitigated (neutral) FVGs
 
    // Section 8: Order Blocks
    bool              bullishOBPresent;
@@ -316,7 +319,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| Section 7: Fair Value Gap Analysis                                |
+//| Section 7: Fair Value Gap Analysis (Aligned with Section07_FVG)   |
 //+------------------------------------------------------------------+
 class CFairValueGap
 {
@@ -324,62 +327,253 @@ private:
    string            m_symbol;
    ENUM_TIMEFRAMES   m_timeframe;
    int               m_lookback;
-   double            m_minGapATR;
+   int               m_atrHandle;
+   double            m_atrBuffer[];
+   double            m_closeBuffer[];
+
+   // Size limits (auto-detected by instrument + timeframe)
+   double            m_minFVGSize;      // Min gap size in pips
+   double            m_maxFVGSize;      // Max gap size in pips
+   double            m_pipValue;
+   string            m_instrumentType;
+   bool              m_requireStrongMove;
+
+   // FVG zone tracking (simplified - just counts)
+   struct FVGZoneInfo
+   {
+      double highPrice;
+      double lowPrice;
+      bool   isBullish;
+      bool   isMitigated;
+   };
+   FVGZoneInfo       m_zones[];
+   int               m_maxZones;
 
 public:
-   void Init(string symbol, ENUM_TIMEFRAMES tf, int lookback = 50, double minGapATR = 0.1)
+   void Init(string symbol, ENUM_TIMEFRAMES tf, int lookback = 100, bool requireStrongMove = true)
    {
       m_symbol = symbol;
       m_timeframe = tf;
       m_lookback = lookback;
-      m_minGapATR = minGapATR;
+      m_requireStrongMove = requireStrongMove;
+      m_maxZones = 10;
+      ArrayResize(m_zones, 0);
+      ArraySetAsSeries(m_atrBuffer, true);
+      ArraySetAsSeries(m_closeBuffer, true);
+
+      // Auto-detect instrument type and pip value
+      string sym = symbol;
+      StringToUpper(sym);
+
+      int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+
+      if(StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0)
+      {
+         m_instrumentType = "GOLD";
+         m_pipValue = 0.10;
+      }
+      else if(StringFind(sym, "XAG") >= 0 || StringFind(sym, "SILVER") >= 0)
+      {
+         m_instrumentType = "SILVER";
+         m_pipValue = 0.01;
+      }
+      else if(StringFind(sym, "JPY") >= 0)
+      {
+         m_instrumentType = "JPY";
+         m_pipValue = point * (digits == 3 ? 1 : 10);
+      }
+      else
+      {
+         m_instrumentType = "FOREX";
+         m_pipValue = (digits == 3 || digits == 5) ? point * 10 : point;
+      }
+
+      // Auto-set FVG size limits by timeframe + instrument
+      AutoSetFVGSizeLimits();
+
+      // Create ATR handle for filtering
+      if(m_requireStrongMove)
+      {
+         m_atrHandle = iATR(symbol, tf, 14);
+      }
+   }
+
+   void AutoSetFVGSizeLimits()
+   {
+      // Base values for FOREX on each timeframe
+      double minBase = 20.0;
+      double maxBase = 200.0;
+
+      switch(m_timeframe)
+      {
+         case PERIOD_M1:   minBase = 2.0;   maxBase = 20.0;   break;
+         case PERIOD_M5:   minBase = 5.0;   maxBase = 50.0;   break;
+         case PERIOD_M15:  minBase = 10.0;  maxBase = 100.0;  break;
+         case PERIOD_M30:  minBase = 15.0;  maxBase = 150.0;  break;
+         case PERIOD_H1:   minBase = 20.0;  maxBase = 200.0;  break;
+         case PERIOD_H4:   minBase = 50.0;  maxBase = 500.0;  break;
+         case PERIOD_D1:   minBase = 100.0; maxBase = 1000.0; break;
+         case PERIOD_W1:   minBase = 200.0; maxBase = 2000.0; break;
+         default:          minBase = 20.0;  maxBase = 200.0;  break;
+      }
+
+      // Scale by instrument
+      double multiplier = 1.0;
+      if(m_instrumentType == "SILVER")
+         multiplier = 2.0;
+
+      m_minFVGSize = minBase * multiplier;
+      m_maxFVGSize = maxBase * multiplier;
    }
 
    void Analyze()
    {
+      // Reset counts
       g_sectionResults.bullishFVGPresent = false;
       g_sectionResults.bearishFVGPresent = false;
       g_sectionResults.priceInFVG = false;
       g_sectionResults.fvgCount = 0;
+      g_sectionResults.bullishFVGCount = 0;
+      g_sectionResults.bearishFVGCount = 0;
+      g_sectionResults.mitigatedFVGCount = 0;
+
+      ArrayResize(m_zones, 0);
 
       double currentPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
 
-      for(int i = 1; i < m_lookback - 2; i++)
+      // Copy close buffer for mitigation check
+      CopyClose(m_symbol, m_timeframe, 0, 10, m_closeBuffer);
+
+      // Copy ATR for filtering
+      double atrValues[];
+      ArraySetAsSeries(atrValues, true);
+      if(m_requireStrongMove && m_atrHandle != INVALID_HANDLE)
       {
-         double high1 = iHigh(m_symbol, m_timeframe, i);
-         double low1 = iLow(m_symbol, m_timeframe, i);
-         double high3 = iHigh(m_symbol, m_timeframe, i + 2);
-         double low3 = iLow(m_symbol, m_timeframe, i + 2);
+         CopyBuffer(m_atrHandle, 0, 0, m_lookback, atrValues);
+      }
 
-         // Bullish FVG: Gap between candle 3 high and candle 1 low
-         if(low1 > high3)
+      for(int i = 2; i < m_lookback - 2; i++)
+      {
+         // Get candle data (left=i+1, middle=i, right=i-1)
+         double leftHigh = iHigh(m_symbol, m_timeframe, i + 1);
+         double leftLow = iLow(m_symbol, m_timeframe, i + 1);
+         double middleHigh = iHigh(m_symbol, m_timeframe, i);
+         double middleLow = iLow(m_symbol, m_timeframe, i);
+         double rightHigh = iHigh(m_symbol, m_timeframe, i - 1);
+         double rightLow = iLow(m_symbol, m_timeframe, i - 1);
+
+         // Check for Bullish FVG: rightLow > leftHigh
+         if(rightLow > leftHigh)
          {
-            g_sectionResults.bullishFVGPresent = true;
-            g_sectionResults.fvgHigh = low1;
-            g_sectionResults.fvgLow = high3;
-            g_sectionResults.fvgMidpoint = (low1 + high3) / 2;
-            g_sectionResults.fvgCount++;
+            double gapSize = (rightLow - leftHigh) / m_pipValue;
 
-            if(currentPrice >= high3 && currentPrice <= low1)
+            // Size filter
+            if(gapSize >= m_minFVGSize && gapSize <= m_maxFVGSize)
             {
-               g_sectionResults.priceInFVG = true;
-               break;
+               // ATR filter (optional strong move check)
+               bool passATR = true;
+               if(m_requireStrongMove && ArraySize(atrValues) > i)
+               {
+                  double atr = atrValues[i];
+                  double moveSize = middleHigh - middleLow;
+                  if(moveSize < atr)
+                     passATR = false;
+               }
+
+               if(passATR)
+               {
+                  // Check if mitigated
+                  bool isMitigated = false;
+                  for(int j = 0; j < ArraySize(m_closeBuffer); j++)
+                  {
+                     if(m_closeBuffer[j] < leftHigh)
+                     {
+                        isMitigated = true;
+                        break;
+                     }
+                  }
+
+                  if(isMitigated)
+                  {
+                     g_sectionResults.mitigatedFVGCount++;
+                  }
+                  else
+                  {
+                     g_sectionResults.bullishFVGPresent = true;
+                     g_sectionResults.bullishFVGCount++;
+
+                     // Store nearest for reference
+                     if(g_sectionResults.bullishFVGCount == 1)
+                     {
+                        g_sectionResults.fvgHigh = rightLow;
+                        g_sectionResults.fvgLow = leftHigh;
+                        g_sectionResults.fvgMidpoint = (rightLow + leftHigh) / 2;
+                     }
+
+                     // Check if price is in this FVG
+                     if(currentPrice >= leftHigh && currentPrice <= rightLow)
+                        g_sectionResults.priceInFVG = true;
+                  }
+                  g_sectionResults.fvgCount++;
+               }
             }
          }
 
-         // Bearish FVG: Gap between candle 1 high and candle 3 low
-         if(high1 < low3)
+         // Check for Bearish FVG: rightHigh < leftLow
+         if(rightHigh < leftLow)
          {
-            g_sectionResults.bearishFVGPresent = true;
-            g_sectionResults.fvgHigh = low3;
-            g_sectionResults.fvgLow = high1;
-            g_sectionResults.fvgMidpoint = (low3 + high1) / 2;
-            g_sectionResults.fvgCount++;
+            double gapSize = (leftLow - rightHigh) / m_pipValue;
 
-            if(currentPrice >= high1 && currentPrice <= low3)
+            // Size filter
+            if(gapSize >= m_minFVGSize && gapSize <= m_maxFVGSize)
             {
-               g_sectionResults.priceInFVG = true;
-               break;
+               // ATR filter
+               bool passATR = true;
+               if(m_requireStrongMove && ArraySize(atrValues) > i)
+               {
+                  double atr = atrValues[i];
+                  double moveSize = middleHigh - middleLow;
+                  if(moveSize < atr)
+                     passATR = false;
+               }
+
+               if(passATR)
+               {
+                  // Check if mitigated
+                  bool isMitigated = false;
+                  for(int j = 0; j < ArraySize(m_closeBuffer); j++)
+                  {
+                     if(m_closeBuffer[j] > leftLow)
+                     {
+                        isMitigated = true;
+                        break;
+                     }
+                  }
+
+                  if(isMitigated)
+                  {
+                     g_sectionResults.mitigatedFVGCount++;
+                  }
+                  else
+                  {
+                     g_sectionResults.bearishFVGPresent = true;
+                     g_sectionResults.bearishFVGCount++;
+
+                     // Store nearest for reference
+                     if(g_sectionResults.bearishFVGCount == 1)
+                     {
+                        g_sectionResults.fvgHigh = leftLow;
+                        g_sectionResults.fvgLow = rightHigh;
+                        g_sectionResults.fvgMidpoint = (leftLow + rightHigh) / 2;
+                     }
+
+                     // Check if price is in this FVG
+                     if(currentPrice >= rightHigh && currentPrice <= leftLow)
+                        g_sectionResults.priceInFVG = true;
+                  }
+                  g_sectionResults.fvgCount++;
+               }
             }
          }
       }
@@ -388,6 +582,9 @@ public:
    bool HasBullishFVG() { return g_sectionResults.bullishFVGPresent; }
    bool HasBearishFVG() { return g_sectionResults.bearishFVGPresent; }
    bool IsPriceInFVG() { return g_sectionResults.priceInFVG; }
+   int GetBullishCount() { return g_sectionResults.bullishFVGCount; }
+   int GetBearishCount() { return g_sectionResults.bearishFVGCount; }
+   int GetMitigatedCount() { return g_sectionResults.mitigatedFVGCount; }
 };
 
 //+------------------------------------------------------------------+
