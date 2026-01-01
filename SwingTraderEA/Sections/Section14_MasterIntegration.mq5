@@ -384,6 +384,24 @@ void PrintSMCDebug()
 {
    Print("═══════════════ SMC ANALYSIS DEBUG ═══════════════");
 
+   // Section 1: ATR Filter
+   Print("SEC 1 | ATR: ", DoubleToString(g_sectionResults.atrValue, 2),
+         " (", DoubleToString(g_sectionResults.atrPips, 1), " pips)",
+         " | Condition: ", g_sectionResults.volatilityCondition,
+         " | Filter: ", g_sectionResults.atrFilterPass ? "PASS" : "FAIL");
+   Print("      | Trend: ", g_sectionResults.volatilityTrend,
+         " | Percentile: ", DoubleToString(g_sectionResults.atrPercentile, 1), "%",
+         " | Squeeze: ", g_sectionResults.volatilitySqueeze ? "YES" : "NO");
+
+   // Section 2: EMA Analysis
+   Print("SEC 2 | EMA50: ", DoubleToString(g_sectionResults.emaFast, 2),
+         " | EMA200: ", DoubleToString(g_sectionResults.emaSlow, 2),
+         " | Bias: ", g_sectionResults.emaTrendBias);
+   Print("      | Bullish: ", g_sectionResults.emaBullish ? "YES" : "NO",
+         " | Bearish: ", g_sectionResults.emaBearish ? "YES" : "NO",
+         " | GoldenX: ", g_sectionResults.emaCrossoverBullish ? "YES" : "NO",
+         " | DeathX: ", g_sectionResults.emaCrossoverBearish ? "YES" : "NO");
+
    // Section 3: Market Structure
    string trendStr = g_analysis.trend == STRUCTURE_BULLISH ? "BULLISH" :
                      g_analysis.trend == STRUCTURE_BEARISH ? "BEARISH" : "RANGING";

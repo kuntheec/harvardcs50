@@ -125,6 +125,32 @@ struct SectionResults
    bool              inRecoveryMode;
    double            currentExposure;
 
+   // Section 1: ATR Filter (from Section01_ATRFilter.mq5)
+   double            atrValue;
+   double            atrPips;
+   double            atrAverage;
+   double            atrPercentile;
+   double            normalizedATR;
+   bool              volatilitySqueeze;
+   bool              volatilityExpanding;
+   bool              volatilityContracting;
+   string            volatilityCondition;      // "QUIET", "NORMAL", "EXTREME"
+   string            volatilityTrend;          // "EXPANDING", "CONTRACTING", "STABLE"
+   bool              atrFilterPass;            // True if volatility is tradeable
+
+   // Section 2: EMA Analysis (from Section02_EMAAnalysis.mq5)
+   double            emaFast;                  // EMA 50
+   double            emaSlow;                  // EMA 200
+   double            emaSpread;                // Distance between EMAs
+   double            emaSpreadPercent;         // Spread as % of price
+   double            emaFastSlope;             // EMA 50 slope
+   double            emaSlowSlope;             // EMA 200 slope
+   bool              emaBullish;               // Price above both EMAs
+   bool              emaBearish;               // Price below both EMAs
+   bool              emaCrossoverBullish;      // Recent golden cross
+   bool              emaCrossoverBearish;      // Recent death cross
+   string            emaTrendBias;             // "BULLISH", "BEARISH", "NEUTRAL"
+
    // Final Signal
    ENUM_SIGNAL_DIRECTION signalDirection;
    double            entryPrice;
@@ -648,6 +674,262 @@ public:
 };
 
 //+------------------------------------------------------------------+
+//| Section 1: ATR Filter (from Section01_ATRFilter.mq5)              |
+//+------------------------------------------------------------------+
+class CATRFilter
+{
+private:
+   string            m_symbol;
+   ENUM_TIMEFRAMES   m_timeframe;
+   int               m_atrHandle;
+   int               m_atrPeriod;
+   double            m_atrBuffer[];
+   double            m_pipValue;
+   string            m_instrumentType;
+
+   // Thresholds
+   double            m_quietThreshold;
+   double            m_extremeThreshold;
+   double            m_expandThresh;
+   double            m_contractThresh;
+   double            m_squeezeThresh;
+   int               m_trendBars;
+   int               m_percentileBars;
+
+public:
+   void Init(string symbol, ENUM_TIMEFRAMES tf, int period = 14,
+             double quietThresh = 60.0, double extremeThresh = 250.0)
+   {
+      m_symbol = symbol;
+      m_timeframe = tf;
+      m_atrPeriod = period;
+      m_quietThreshold = quietThresh;
+      m_extremeThreshold = extremeThresh;
+      m_expandThresh = 1.2;
+      m_contractThresh = 0.8;
+      m_squeezeThresh = 0.6;
+      m_trendBars = 10;
+      m_percentileBars = 50;
+
+      // Create ATR handle
+      m_atrHandle = iATR(symbol, tf, period);
+      ArraySetAsSeries(m_atrBuffer, true);
+
+      // Auto-detect instrument type for pip value
+      string sym = symbol;
+      StringToUpper(sym);
+
+      if(StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0)
+      {
+         m_instrumentType = "GOLD";
+         m_pipValue = 0.10;
+      }
+      else if(StringFind(sym, "XAG") >= 0 || StringFind(sym, "SILVER") >= 0)
+      {
+         m_instrumentType = "SILVER";
+         m_pipValue = 0.01;
+      }
+      else if(StringFind(sym, "JPY") >= 0)
+      {
+         m_instrumentType = "JPY";
+         int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+         m_pipValue = SymbolInfoDouble(symbol, SYMBOL_POINT) * (digits == 3 ? 1 : 10);
+      }
+      else
+      {
+         m_instrumentType = "FOREX";
+         int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+         m_pipValue = SymbolInfoDouble(symbol, SYMBOL_POINT) * (digits == 5 ? 10 : 1);
+      }
+   }
+
+   void Analyze()
+   {
+      if(m_atrHandle == INVALID_HANDLE) return;
+
+      // Copy ATR buffer
+      int copied = CopyBuffer(m_atrHandle, 0, 0, m_percentileBars + 10, m_atrBuffer);
+      if(copied < m_percentileBars) return;
+
+      // Current ATR value
+      g_sectionResults.atrValue = m_atrBuffer[0];
+      g_sectionResults.atrPips = m_atrBuffer[0] / m_pipValue;
+
+      // Normalized ATR (as % of price)
+      double currentPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
+      g_sectionResults.normalizedATR = (m_atrBuffer[0] / currentPrice) * 100;
+
+      // Calculate ATR average
+      double atrSum = 0;
+      for(int i = 0; i < m_percentileBars; i++)
+         atrSum += m_atrBuffer[i];
+      g_sectionResults.atrAverage = atrSum / m_percentileBars;
+
+      // Calculate ATR percentile
+      int countBelow = 0;
+      for(int i = 1; i < m_percentileBars; i++)
+      {
+         if(m_atrBuffer[i] < m_atrBuffer[0])
+            countBelow++;
+      }
+      g_sectionResults.atrPercentile = ((double)countBelow / (m_percentileBars - 1)) * 100;
+
+      // Volatility condition
+      if(g_sectionResults.atrPips < m_quietThreshold)
+      {
+         g_sectionResults.volatilityCondition = "QUIET";
+         g_sectionResults.atrFilterPass = false;  // Don't trade in quiet markets
+      }
+      else if(g_sectionResults.atrPips > m_extremeThreshold)
+      {
+         g_sectionResults.volatilityCondition = "EXTREME";
+         g_sectionResults.atrFilterPass = false;  // Don't trade in extreme volatility
+      }
+      else
+      {
+         g_sectionResults.volatilityCondition = "NORMAL";
+         g_sectionResults.atrFilterPass = true;   // Good to trade
+      }
+
+      // Volatility trend (expanding/contracting)
+      double ratio = m_atrBuffer[0] / g_sectionResults.atrAverage;
+
+      if(ratio >= m_expandThresh)
+      {
+         g_sectionResults.volatilityExpanding = true;
+         g_sectionResults.volatilityContracting = false;
+         g_sectionResults.volatilityTrend = "EXPANDING";
+      }
+      else if(ratio <= m_contractThresh)
+      {
+         g_sectionResults.volatilityExpanding = false;
+         g_sectionResults.volatilityContracting = true;
+         g_sectionResults.volatilityTrend = "CONTRACTING";
+      }
+      else
+      {
+         g_sectionResults.volatilityExpanding = false;
+         g_sectionResults.volatilityContracting = false;
+         g_sectionResults.volatilityTrend = "STABLE";
+      }
+
+      // Volatility squeeze detection
+      g_sectionResults.volatilitySqueeze = (ratio <= m_squeezeThresh);
+   }
+
+   // Getters
+   double GetATR() { return g_sectionResults.atrValue; }
+   double GetATRPips() { return g_sectionResults.atrPips; }
+   bool IsFilterPass() { return g_sectionResults.atrFilterPass; }
+   string GetVolatilityCondition() { return g_sectionResults.volatilityCondition; }
+   string GetInstrumentType() { return m_instrumentType; }
+   double GetPipValue() { return m_pipValue; }
+};
+
+//+------------------------------------------------------------------+
+//| Section 2: EMA Analysis (from Section02_EMAAnalysis.mq5)          |
+//+------------------------------------------------------------------+
+class CEMAAnalysis
+{
+private:
+   string            m_symbol;
+   ENUM_TIMEFRAMES   m_timeframe;
+   int               m_emaFastHandle;
+   int               m_emaSlowHandle;
+   int               m_fastPeriod;
+   int               m_slowPeriod;
+   int               m_slopePeriod;
+   int               m_crossoverLookback;
+   double            m_emaFastBuffer[];
+   double            m_emaSlowBuffer[];
+
+public:
+   void Init(string symbol, ENUM_TIMEFRAMES tf, int fastPeriod = 50, int slowPeriod = 200,
+             int slopePeriod = 5, int crossoverLookback = 10)
+   {
+      m_symbol = symbol;
+      m_timeframe = tf;
+      m_fastPeriod = fastPeriod;
+      m_slowPeriod = slowPeriod;
+      m_slopePeriod = slopePeriod;
+      m_crossoverLookback = crossoverLookback;
+
+      // Create EMA handles
+      m_emaFastHandle = iMA(symbol, tf, fastPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      m_emaSlowHandle = iMA(symbol, tf, slowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+
+      ArraySetAsSeries(m_emaFastBuffer, true);
+      ArraySetAsSeries(m_emaSlowBuffer, true);
+   }
+
+   void Analyze()
+   {
+      if(m_emaFastHandle == INVALID_HANDLE || m_emaSlowHandle == INVALID_HANDLE) return;
+
+      // Copy EMA buffers
+      int bars = m_crossoverLookback + m_slopePeriod + 5;
+      if(CopyBuffer(m_emaFastHandle, 0, 0, bars, m_emaFastBuffer) < bars) return;
+      if(CopyBuffer(m_emaSlowHandle, 0, 0, bars, m_emaSlowBuffer) < bars) return;
+
+      // Current EMA values
+      g_sectionResults.emaFast = m_emaFastBuffer[0];
+      g_sectionResults.emaSlow = m_emaSlowBuffer[0];
+
+      // EMA spread
+      g_sectionResults.emaSpread = m_emaFastBuffer[0] - m_emaSlowBuffer[0];
+      double currentPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
+      g_sectionResults.emaSpreadPercent = (g_sectionResults.emaSpread / currentPrice) * 100;
+
+      // Calculate EMA slopes
+      g_sectionResults.emaFastSlope = (m_emaFastBuffer[0] - m_emaFastBuffer[m_slopePeriod]) / m_slopePeriod;
+      g_sectionResults.emaSlowSlope = (m_emaSlowBuffer[0] - m_emaSlowBuffer[m_slopePeriod]) / m_slopePeriod;
+
+      // Price position relative to EMAs
+      g_sectionResults.emaBullish = (currentPrice > m_emaFastBuffer[0] && currentPrice > m_emaSlowBuffer[0]);
+      g_sectionResults.emaBearish = (currentPrice < m_emaFastBuffer[0] && currentPrice < m_emaSlowBuffer[0]);
+
+      // Crossover detection
+      g_sectionResults.emaCrossoverBullish = false;
+      g_sectionResults.emaCrossoverBearish = false;
+
+      for(int i = 0; i < m_crossoverLookback; i++)
+      {
+         // Golden cross: Fast crosses above Slow
+         if(m_emaFastBuffer[i] > m_emaSlowBuffer[i] &&
+            m_emaFastBuffer[i+1] <= m_emaSlowBuffer[i+1])
+         {
+            g_sectionResults.emaCrossoverBullish = true;
+            break;
+         }
+         // Death cross: Fast crosses below Slow
+         if(m_emaFastBuffer[i] < m_emaSlowBuffer[i] &&
+            m_emaFastBuffer[i+1] >= m_emaSlowBuffer[i+1])
+         {
+            g_sectionResults.emaCrossoverBearish = true;
+            break;
+         }
+      }
+
+      // Overall trend bias
+      if(g_sectionResults.emaBullish && m_emaFastBuffer[0] > m_emaSlowBuffer[0])
+         g_sectionResults.emaTrendBias = "BULLISH";
+      else if(g_sectionResults.emaBearish && m_emaFastBuffer[0] < m_emaSlowBuffer[0])
+         g_sectionResults.emaTrendBias = "BEARISH";
+      else
+         g_sectionResults.emaTrendBias = "NEUTRAL";
+   }
+
+   // Getters
+   double GetEMAFast() { return g_sectionResults.emaFast; }
+   double GetEMASlow() { return g_sectionResults.emaSlow; }
+   bool IsBullish() { return g_sectionResults.emaBullish; }
+   bool IsBearish() { return g_sectionResults.emaBearish; }
+   string GetTrendBias() { return g_sectionResults.emaTrendBias; }
+   bool HasGoldenCross() { return g_sectionResults.emaCrossoverBullish; }
+   bool HasDeathCross() { return g_sectionResults.emaCrossoverBearish; }
+};
+
+//+------------------------------------------------------------------+
 //| Section 11: Confluence Calculator                                 |
 //+------------------------------------------------------------------+
 class CConfluence
@@ -718,6 +1000,11 @@ public:
 class CMasterSMC
 {
 private:
+   // Section 1 & 2: ATR and EMA
+   CATRFilter        m_atrFilter;
+   CEMAAnalysis      m_emaAnalysis;
+
+   // Section 3-11: SMC Modules
    CMarketStructure  m_structure;
    CFairValueGap     m_fvg;
    COrderBlock       m_orderBlock;
@@ -737,6 +1024,13 @@ public:
       m_htf = htf;
       m_ltf = ltf;
 
+      // Initialize Section 1: ATR Filter (using HTF timeframe)
+      m_atrFilter.Init(symbol, htf, 14, 60.0, 250.0);
+
+      // Initialize Section 2: EMA Analysis (using HTF timeframe)
+      m_emaAnalysis.Init(symbol, htf, 50, 200, 5, 10);
+
+      // Initialize SMC modules
       m_structure.Init(symbol, htf);
       m_fvg.Init(symbol, ltf);
       m_orderBlock.Init(symbol, htf);
@@ -750,7 +1044,13 @@ public:
       // Clear previous results
       ZeroMemory(g_sectionResults);
 
-      // Run all section analyses
+      // Section 1: ATR Filter Analysis
+      m_atrFilter.Analyze();
+
+      // Section 2: EMA Analysis
+      m_emaAnalysis.Analyze();
+
+      // Run all SMC section analyses
       m_structure.Analyze();    // Section 3
       m_fvg.Analyze();          // Section 7
       m_orderBlock.Analyze();   // Section 8
@@ -758,7 +1058,7 @@ public:
       m_fibonacci.Analyze();    // Section 9
       m_session.Analyze();      // Section 6
 
-      // Calculate HTF/LTF alignment
+      // Calculate HTF/LTF alignment (now uses EMA data)
       AnalyzeHTFLTFAlignment();
 
       // Calculate confluence score
@@ -767,7 +1067,7 @@ public:
 
    void AnalyzeHTFLTFAlignment()
    {
-      // HTF trend
+      // HTF trend - enhanced with EMA confirmation
       g_sectionResults.htfTrendBullish = (g_sectionResults.marketTrend == TREND_BULLISH);
       g_sectionResults.htfTrendBearish = (g_sectionResults.marketTrend == TREND_BEARISH);
 
@@ -775,8 +1075,16 @@ public:
       double ltfClose = iClose(m_symbol, m_ltf, 0);
       double ltfOpen = iOpen(m_symbol, m_ltf, 0);
 
-      if(g_sectionResults.htfTrendBullish && ltfClose > ltfOpen)
+      // Enhanced: Consider EMA alignment for stronger confirmation
+      bool emaBullishConfirm = g_sectionResults.emaBullish && g_sectionResults.emaFast > g_sectionResults.emaSlow;
+      bool emaBearishConfirm = g_sectionResults.emaBearish && g_sectionResults.emaFast < g_sectionResults.emaSlow;
+
+      if(g_sectionResults.htfTrendBullish && ltfClose > ltfOpen && emaBullishConfirm)
          g_sectionResults.ltfEntryValid = true;
+      else if(g_sectionResults.htfTrendBearish && ltfClose < ltfOpen && emaBearishConfirm)
+         g_sectionResults.ltfEntryValid = true;
+      else if(g_sectionResults.htfTrendBullish && ltfClose > ltfOpen)
+         g_sectionResults.ltfEntryValid = true;  // Allow without EMA but less weight
       else if(g_sectionResults.htfTrendBearish && ltfClose < ltfOpen)
          g_sectionResults.ltfEntryValid = true;
 
@@ -794,6 +1102,17 @@ public:
    bool IsLiquiditySwept() { return g_sectionResults.liquiditySwept; }
    bool IsHTFLTFAligned() { return g_sectionResults.htfLtfAligned; }
    bool IsSessionActive() { return g_sectionResults.sessionActive; }
+
+   // Section 1 & 2 Getters
+   double GetATR() { return g_sectionResults.atrValue; }
+   double GetATRPips() { return g_sectionResults.atrPips; }
+   bool IsATRFilterPass() { return g_sectionResults.atrFilterPass; }
+   string GetVolatilityCondition() { return g_sectionResults.volatilityCondition; }
+   double GetEMAFast() { return g_sectionResults.emaFast; }
+   double GetEMASlow() { return g_sectionResults.emaSlow; }
+   string GetEMATrendBias() { return g_sectionResults.emaTrendBias; }
+   bool IsEMABullish() { return g_sectionResults.emaBullish; }
+   bool IsEMABearish() { return g_sectionResults.emaBearish; }
 };
 
 //+------------------------------------------------------------------+
