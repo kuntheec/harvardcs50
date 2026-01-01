@@ -115,6 +115,11 @@ input bool     InpAlertOnTrade        = true;              // Alert on Trade Exe
 input bool     InpPushNotifications   = false;             // Send Push Notifications
 input bool     InpEmailAlerts         = false;             // Send Email Alerts
 
+input group "=== Backtest Date Range ==="
+input bool     InpUseDateFilter       = false;             // Enable Date Range Filter
+input datetime InpStartDate           = D'2024.01.01 00:00'; // Start Date (for backtest)
+input datetime InpEndDate             = D'2024.12.31 23:59'; // End Date (for backtest)
+
 //+------------------------------------------------------------------+
 //| Structures                                                        |
 //+------------------------------------------------------------------+
@@ -313,11 +318,41 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
+//| Check if current time is within backtest date range               |
+//+------------------------------------------------------------------+
+bool IsWithinDateRange()
+{
+   if(!InpUseDateFilter)
+      return true;  // No filter, always allow
+
+   datetime currentTime = TimeCurrent();
+   return (currentTime >= InpStartDate && currentTime <= InpEndDate);
+}
+
+//+------------------------------------------------------------------+
 //| Expert tick function                                              |
 //+------------------------------------------------------------------+
 void OnTick()
 {
    if(!g_status.initialized) return;
+
+   // Check date range filter (for backtesting)
+   if(InpUseDateFilter && !IsWithinDateRange())
+   {
+      datetime currentTime = TimeCurrent();
+
+      // Update status to show we're outside the date range
+      if(currentTime < InpStartDate)
+         g_status.statusMessage = "Waiting for Start Date";
+      else
+         g_status.statusMessage = "Past End Date - Stopped";
+
+      // Still update panel to show status
+      if(InpShowMasterPanel)
+         UpdatePanel();
+
+      return;  // Skip all processing outside date range
+   }
 
    // Update ATR
    CopyBuffer(g_atrHandle, 0, 0, 3, g_atrBuffer);
@@ -1596,6 +1631,18 @@ void PrintInitialization()
    Print("║   TP3: ", InpTP3_RR, "R (Final)");
    Print("║   Break-Even: ", InpUseBreakEven ? "Enabled" : "Disabled");
    Print("║   Trailing: ", InpUseTrailing ? "Enabled" : "Disabled");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+   Print("║ BACKTEST DATE RANGE:");
+   if(InpUseDateFilter)
+   {
+      Print("║   Filter: ENABLED");
+      Print("║   Start:  ", TimeToString(InpStartDate, TIME_DATE|TIME_MINUTES));
+      Print("║   End:    ", TimeToString(InpEndDate, TIME_DATE|TIME_MINUTES));
+   }
+   else
+   {
+      Print("║   Filter: DISABLED (All dates processed)");
+   }
    Print("╚═══════════════════════════════════════════════════════════╝");
    Print("");
 }
