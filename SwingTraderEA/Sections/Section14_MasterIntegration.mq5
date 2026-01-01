@@ -273,6 +273,11 @@ int OnInit()
 
    PrintInitialization();
 
+   // Run initial analysis immediately (don't wait for new bar)
+   CopyBuffer(g_atrHandle, 0, 0, 3, g_atrBuffer);
+   RunSMCAnalysis();
+   Print("✓ Initial SMC Analysis Complete");
+
    return INIT_SUCCEEDED;
 }
 
