@@ -46,14 +46,8 @@ enum ENUM_MARKET_STRUCTURE
    STRUCTURE_RANGING
 };
 
-enum ENUM_SESSION
-{
-   SESSION_ASIAN,
-   SESSION_LONDON,
-   SESSION_NEW_YORK,
-   SESSION_OVERLAP,
-   SESSION_OFF_HOURS
-};
+// Note: ENUM_SESSION_TYPE is defined in SMCModules.mqh
+// SESSION_ASIA, SESSION_LONDON, SESSION_NEWYORK, SESSION_OVERLAP, SESSION_OFFHOURS
 
 //+------------------------------------------------------------------+
 //| Input Parameters                                                  |
@@ -145,7 +139,7 @@ struct SMCAnalysis
    bool              eqlTaken;
 
    // Sessions/News (Section 6)
-   ENUM_SESSION      currentSession;
+   ENUM_SESSION_TYPE currentSession;
    bool              sessionActive;
    bool              newsUpcoming;
    int               minsToNews;
@@ -399,11 +393,8 @@ void SyncSectionResults()
    g_analysis.liquidityLevel = g_sectionResults.liquidityLevel;
    g_analysis.eqlTaken = g_sectionResults.eqlTaken;
 
-   // Section 6: Sessions
-   g_analysis.currentSession = (g_sectionResults.currentSession == SESSION_ASIA) ? SESSION_ASIAN :
-                               (g_sectionResults.currentSession == SESSION_LONDON) ? SESSION_LONDON :
-                               (g_sectionResults.currentSession == SESSION_NEWYORK) ? SESSION_NEW_YORK :
-                               (g_sectionResults.currentSession == SESSION_OVERLAP) ? SESSION_OVERLAP : SESSION_OFF_HOURS;
+   // Section 6: Sessions (directly assign since both use ENUM_SESSION_TYPE)
+   g_analysis.currentSession = g_sectionResults.currentSession;
    g_analysis.sessionActive = g_sectionResults.sessionActive;
    g_analysis.newsUpcoming = g_sectionResults.newsUpcoming;
    g_analysis.minsToNews = g_sectionResults.minsToNews;
@@ -593,20 +584,20 @@ void AnalyzeSessionsNews()
    TimeToStruct(TimeCurrent(), dt);
    int hour = dt.hour;
 
-   // Determine current session
+   // Determine current session (using ENUM_SESSION_TYPE from SMCModules.mqh)
    if(hour >= InpAsiaStart && hour < InpAsiaEnd)
-      g_analysis.currentSession = SESSION_ASIAN;
+      g_analysis.currentSession = SESSION_ASIA;
    else if(hour >= InpLondonStart && hour < InpNYStart)
       g_analysis.currentSession = SESSION_LONDON;
    else if(hour >= InpNYStart && hour < InpLondonEnd)
       g_analysis.currentSession = SESSION_OVERLAP;
    else if(hour >= InpLondonEnd && hour < InpNYEnd)
-      g_analysis.currentSession = SESSION_NEW_YORK;
+      g_analysis.currentSession = SESSION_NEWYORK;
    else
-      g_analysis.currentSession = SESSION_OFF_HOURS;
+      g_analysis.currentSession = SESSION_OFFHOURS;
 
    // Session is active if not off-hours
-   g_analysis.sessionActive = (g_analysis.currentSession != SESSION_OFF_HOURS);
+   g_analysis.sessionActive = (g_analysis.currentSession != SESSION_OFFHOURS);
 
    // Note: Real news detection would require external calendar
    // This is a placeholder - in production, integrate with news API
@@ -1371,9 +1362,9 @@ void UpdatePanel()
 
    // Session
    string sessionStr = g_analysis.currentSession == SESSION_LONDON ? "London" :
-                       g_analysis.currentSession == SESSION_NEW_YORK ? "New York" :
+                       g_analysis.currentSession == SESSION_NEWYORK ? "New York" :
                        g_analysis.currentSession == SESSION_OVERLAP ? "Overlap" :
-                       g_analysis.currentSession == SESSION_ASIAN ? "Asian" : "Off Hours";
+                       g_analysis.currentSession == SESSION_ASIA ? "Asian" : "Off Hours";
    ObjectSetString(0, g_panelName + "_V5", OBJPROP_TEXT, sessionStr);
    ObjectSetInteger(0, g_panelName + "_V5", OBJPROP_COLOR, g_analysis.sessionActive ? clrLime : clrGray);
 
