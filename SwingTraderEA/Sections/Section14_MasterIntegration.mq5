@@ -1,18 +1,18 @@
 //+------------------------------------------------------------------+
 //|                                  Section14_MasterIntegration.mq5  |
 //|                         SwingTrader Pro EA - Master Controller    |
-//|                                 Version 1.00 - Full SMC System    |
+//|                                 Version 1.01 - Full SMC System    |
 //+------------------------------------------------------------------+
 #property copyright "SwingTrader Pro"
 #property link      ""
-#property version   "1.00"
-#property strict
+#property version   "1.01"
 
 //+------------------------------------------------------------------+
 //| Include All Section Modules                                       |
 //+------------------------------------------------------------------+
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
+#include <SwingTraderPro/SMCModules.mqh>  // All SMC analysis modules
 
 //+------------------------------------------------------------------+
 //| Enumerations                                                      |
@@ -230,6 +230,9 @@ SMCAnalysis       g_analysis;
 TradeStats        g_stats;
 EAStatus          g_status;
 
+// Master SMC Analyzer - Calls All Section Modules
+CMasterSMC        g_masterSMC;
+
 int               g_atrHandle;
 double            g_atrBuffer[];
 
@@ -260,6 +263,9 @@ int OnInit()
    ZeroMemory(g_analysis);
    ZeroMemory(g_stats);
    ZeroMemory(g_status);
+
+   // Initialize Master SMC Analyzer with all section modules
+   g_masterSMC.Init(_Symbol, InpHTF, InpLTF);
 
    g_status.initialized = true;
    g_status.tradingEnabled = (InpEAMode != MODE_ANALYSIS_ONLY);
@@ -352,41 +358,83 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 }
 
 //+------------------------------------------------------------------+
-//| Run Full SMC Analysis                                             |
+//| Run Full SMC Analysis - Uses Real Section Modules                 |
 //+------------------------------------------------------------------+
 void RunSMCAnalysis()
 {
    ZeroMemory(g_analysis);
 
-   // Section 3: Market Structure
-   AnalyzeMarketStructure();
+   // Run all section analyses via Master SMC module
+   // This calls Sections 3, 5, 6, 7, 8, 9, 10, 11 in sequence
+   g_masterSMC.RunFullAnalysis();
 
-   // Section 4: Supply/Demand Zones
-   AnalyzeSupplyDemand();
+   // Sync results from g_sectionResults (SMCModules) to g_analysis (local)
+   SyncSectionResults();
+
+   // Generate final signal based on all section data
+   GenerateSignal();
+}
+
+//+------------------------------------------------------------------+
+//| Sync Section Results to Local Analysis Structure                  |
+//+------------------------------------------------------------------+
+void SyncSectionResults()
+{
+   // Section 3: Market Structure
+   g_analysis.trend = (g_sectionResults.marketTrend == TREND_BULLISH) ? STRUCTURE_BULLISH :
+                      (g_sectionResults.marketTrend == TREND_BEARISH) ? STRUCTURE_BEARISH : STRUCTURE_RANGING;
+   g_analysis.bosConfirmed = g_sectionResults.bosConfirmed;
+   g_analysis.chochDetected = g_sectionResults.chochDetected;
+   g_analysis.lastSwingHigh = g_sectionResults.lastSwingHigh;
+   g_analysis.lastSwingLow = g_sectionResults.lastSwingLow;
+
+   // Section 4: Supply/Demand
+   g_analysis.inSupplyZone = g_sectionResults.inSupplyZone;
+   g_analysis.inDemandZone = g_sectionResults.inDemandZone;
+   g_analysis.nearestSupply = g_sectionResults.supplyZoneHigh;
+   g_analysis.nearestDemand = g_sectionResults.demandZoneLow;
 
    // Section 5: Liquidity
-   AnalyzeLiquidity();
+   g_analysis.liquiditySwept = g_sectionResults.liquiditySwept;
+   g_analysis.liquidityLevel = g_sectionResults.liquidityLevel;
+   g_analysis.eqlTaken = g_sectionResults.eqlTaken;
 
-   // Section 6: Sessions & News
-   AnalyzeSessionsNews();
+   // Section 6: Sessions
+   g_analysis.currentSession = (g_sectionResults.currentSession == SESSION_ASIA) ? SESSION_ASIAN :
+                               (g_sectionResults.currentSession == SESSION_LONDON) ? SESSION_LONDON :
+                               (g_sectionResults.currentSession == SESSION_NEWYORK) ? SESSION_NEW_YORK :
+                               (g_sectionResults.currentSession == SESSION_OVERLAP) ? SESSION_OVERLAP : SESSION_OFF_HOURS;
+   g_analysis.sessionActive = g_sectionResults.sessionActive;
+   g_analysis.newsUpcoming = g_sectionResults.newsUpcoming;
+   g_analysis.minsToNews = g_sectionResults.minsToNews;
 
-   // Section 7: Fair Value Gaps
-   AnalyzeFVG();
+   // Section 7: FVG
+   g_analysis.bullishFVG = g_sectionResults.bullishFVGPresent;
+   g_analysis.bearishFVG = g_sectionResults.bearishFVGPresent;
+   g_analysis.fvgHigh = g_sectionResults.fvgHigh;
+   g_analysis.fvgLow = g_sectionResults.fvgLow;
 
    // Section 8: Order Blocks
-   AnalyzeOrderBlocks();
+   g_analysis.bullishOB = g_sectionResults.bullishOBPresent;
+   g_analysis.bearishOB = g_sectionResults.bearishOBPresent;
+   g_analysis.obHigh = g_sectionResults.obHigh;
+   g_analysis.obLow = g_sectionResults.obLow;
 
    // Section 9: Fibonacci/OTE
-   AnalyzeFibonacci();
+   g_analysis.inOTE = g_sectionResults.inOTEZone;
+   g_analysis.oteHigh = g_sectionResults.oteHigh;
+   g_analysis.oteLow = g_sectionResults.oteLow;
+   g_analysis.fibLevel = g_sectionResults.currentFibLevel;
 
-   // Section 10: Killzones (HTF/LTF Alignment)
-   AnalyzeKillzones();
+   // Section 10: Killzones
+   g_analysis.htfAligned = g_sectionResults.htfLtfAligned;
+   g_analysis.ltfEntry = g_sectionResults.ltfEntryValid;
 
-   // Section 11: Calculate Confluence Score
-   CalculateConfluence();
-
-   // Generate final signal
-   GenerateSignal();
+   // Section 11: Confluence
+   g_analysis.confluenceScore = g_sectionResults.confluenceScore;
+   g_analysis.signalStrength = g_sectionResults.signalStrong ? SIGNAL_STRONG :
+                               g_sectionResults.signalModerate ? SIGNAL_MODERATE :
+                               g_sectionResults.signalWeak ? SIGNAL_WEAK : SIGNAL_NONE;
 }
 
 //+------------------------------------------------------------------+
