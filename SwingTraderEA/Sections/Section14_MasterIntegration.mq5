@@ -367,6 +367,73 @@ void RunSMCAnalysis()
 
    // Generate final signal based on all section data
    GenerateSignal();
+
+   // Debug: Print all section values
+   PrintSMCDebug();
+}
+
+//+------------------------------------------------------------------+
+//| Debug Print - Shows All Section Values                            |
+//+------------------------------------------------------------------+
+void PrintSMCDebug()
+{
+   Print("═══════════════ SMC ANALYSIS DEBUG ═══════════════");
+
+   // Section 3: Market Structure
+   string trendStr = g_analysis.trend == STRUCTURE_BULLISH ? "BULLISH" :
+                     g_analysis.trend == STRUCTURE_BEARISH ? "BEARISH" : "RANGING";
+   Print("SEC 3 | Trend: ", trendStr, " | BOS: ", g_analysis.bosConfirmed ? "YES" : "NO",
+         " | CHoCH: ", g_analysis.chochDetected ? "YES" : "NO");
+   Print("      | SwingHigh: ", DoubleToString(g_analysis.lastSwingHigh, 2),
+         " | SwingLow: ", DoubleToString(g_analysis.lastSwingLow, 2));
+
+   // Section 4: Supply/Demand
+   Print("SEC 4 | InSupply: ", g_analysis.inSupplyZone ? "YES" : "NO",
+         " | InDemand: ", g_analysis.inDemandZone ? "YES" : "NO");
+
+   // Section 5: Liquidity
+   Print("SEC 5 | LiqSwept: ", g_analysis.liquiditySwept ? "YES" : "NO",
+         " | EQLTaken: ", g_analysis.eqlTaken ? "YES" : "NO",
+         " | Level: ", DoubleToString(g_analysis.liquidityLevel, 2));
+
+   // Section 6: Session
+   string sessionStr = g_analysis.currentSession == SESSION_LONDON ? "London" :
+                       g_analysis.currentSession == SESSION_NEWYORK ? "NewYork" :
+                       g_analysis.currentSession == SESSION_OVERLAP ? "Overlap" :
+                       g_analysis.currentSession == SESSION_ASIA ? "Asia" : "OffHours";
+   Print("SEC 6 | Session: ", sessionStr, " | Active: ", g_analysis.sessionActive ? "YES" : "NO");
+
+   // Section 7: FVG
+   Print("SEC 7 | BullFVG: ", g_analysis.bullishFVG ? "YES" : "NO",
+         " | BearFVG: ", g_analysis.bearishFVG ? "YES" : "NO");
+
+   // Section 8: Order Blocks
+   Print("SEC 8 | BullOB: ", g_analysis.bullishOB ? "YES" : "NO",
+         " | BearOB: ", g_analysis.bearishOB ? "YES" : "NO");
+   if(g_analysis.bullishOB || g_analysis.bearishOB)
+      Print("      | OB Range: ", DoubleToString(g_analysis.obLow, 2), " - ", DoubleToString(g_analysis.obHigh, 2));
+
+   // Section 9: Fibonacci/OTE
+   Print("SEC 9 | InOTE: ", g_analysis.inOTE ? "YES" : "NO",
+         " | FibLevel: ", DoubleToString(g_analysis.fibLevel * 100, 1), "%");
+
+   // Section 10: HTF/LTF
+   Print("SEC10 | HTFAligned: ", g_analysis.htfAligned ? "YES" : "NO",
+         " | LTFEntry: ", g_analysis.ltfEntry ? "YES" : "NO");
+
+   // Section 11: Confluence
+   Print("SEC11 | Confluence: ", g_analysis.confluenceScore, "/10",
+         " | Strength: ", g_analysis.signalStrength == SIGNAL_STRONG ? "STRONG" :
+                          g_analysis.signalStrength == SIGNAL_MODERATE ? "MODERATE" :
+                          g_analysis.signalStrength == SIGNAL_WEAK ? "WEAK" : "NONE");
+
+   // Final Signal
+   string dirStr = g_analysis.direction == DIR_BUY ? "BUY" :
+                   g_analysis.direction == DIR_SELL ? "SELL" : "NONE";
+   Print("SIGNAL| Direction: ", dirStr, " | Valid: ", g_analysis.signalValid ? "YES" : "NO");
+   Print("      | Reason: ", g_analysis.signalReason);
+
+   Print("═══════════════════════════════════════════════════");
 }
 
 //+------------------------------------------------------------------+
