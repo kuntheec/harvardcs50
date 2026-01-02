@@ -120,6 +120,40 @@ input bool     InpUseDateFilter       = false;             // Enable Date Range 
 input datetime InpStartDate           = D'2024.01.01 00:00'; // Start Date (for backtest)
 input datetime InpEndDate             = D'2024.12.31 23:59'; // End Date (for backtest)
 
+input group "=== Debug Step Mode ==="
+input bool     InpDebugStepMode       = false;             // Enable Step-by-Step Initialization
+input bool     InpAutoAdvance         = false;             // Auto-advance after 3 seconds (no button click)
+input int      InpAutoAdvanceDelay    = 3;                 // Auto-advance delay (seconds)
+
+//+------------------------------------------------------------------+
+//| Debug Step Mode - Initialization State                            |
+//+------------------------------------------------------------------+
+enum ENUM_INIT_STEP
+{
+   STEP_NOT_STARTED = 0,
+   STEP_SECTION_1,      // ATR Filter
+   STEP_SECTION_2,      // EMA Analysis
+   STEP_SECTION_3,      // Market Structure
+   STEP_SECTION_4,      // Supply/Demand
+   STEP_SECTION_5,      // Liquidity
+   STEP_SECTION_6,      // Sessions
+   STEP_SECTION_7,      // FVG
+   STEP_SECTION_8,      // Order Blocks
+   STEP_SECTION_9,      // Fibonacci/OTE
+   STEP_SECTION_10,     // Killzones
+   STEP_SECTION_11,     // Confluence
+   STEP_COMPLETE        // All sections initialized
+};
+
+// Cached section results for debug mode
+struct SectionReport
+{
+   bool     analyzed;
+   bool     confirmed;
+   string   summary;
+   datetime timestamp;
+};
+
 //+------------------------------------------------------------------+
 //| Structures                                                        |
 //+------------------------------------------------------------------+
@@ -239,6 +273,14 @@ string            g_panelName = "SEC14_MasterPanel";
 datetime          g_lastBarTime = 0;
 int               g_todayDayOfYear = -1;
 
+// Debug Step Mode Variables
+ENUM_INIT_STEP    g_currentStep = STEP_NOT_STARTED;
+SectionReport     g_sectionReports[12];    // Reports for sections 1-11 + summary
+datetime          g_stepStartTime = 0;
+bool              g_stepModeActive = false;
+string            g_continueButtonName = "SEC14_ContinueBtn";
+string            g_stepPanelName = "SEC14_StepPanel";
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
 //+------------------------------------------------------------------+
@@ -283,6 +325,14 @@ int OnInit()
    RunSMCAnalysis();
    Print("✓ Initial SMC Analysis Complete");
 
+   // Check if Debug Step Mode is enabled
+   if(InpDebugStepMode)
+   {
+      g_status.statusMessage = "Debug Step Mode";
+      InitStepMode();
+      return INIT_SUCCEEDED;
+   }
+
    // Set initial status message based on trading mode
    if(InpEAMode == MODE_ANALYSIS_ONLY)
       g_status.statusMessage = "Analysis Mode";
@@ -307,6 +357,12 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_atrHandle);
 
    DeletePanel();
+
+   // Cleanup step mode UI
+   if(InpDebugStepMode)
+   {
+      DeleteStepModeUI();
+   }
 
    Print("=================================================");
    Print("SwingTrader Pro EA Deinitialized");
@@ -335,6 +391,14 @@ bool IsWithinDateRange()
 void OnTick()
 {
    if(!g_status.initialized) return;
+
+   // Skip normal processing while step mode is active
+   if(g_stepModeActive)
+   {
+      // Just update the step mode UI
+      UpdateStepModeUI();
+      return;
+   }
 
    // Check date range filter (for backtesting)
    if(InpUseDateFilter && !IsWithinDateRange())
@@ -414,6 +478,613 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
       // Update statistics on new deal
       UpdateTradeStats();
    }
+}
+
+//+------------------------------------------------------------------+
+//| Chart Event Handler - For Step Mode Button                        |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+{
+   // Handle button click for step mode
+   if(id == CHARTEVENT_OBJECT_CLICK)
+   {
+      if(sparam == g_continueButtonName && g_stepModeActive)
+      {
+         // User clicked Continue - advance to next step
+         AdvanceToNextStep();
+
+         // Reset button state
+         ObjectSetInteger(0, g_continueButtonName, OBJPROP_STATE, false);
+         ChartRedraw();
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Timer Event Handler - For Auto-Advance Mode                       |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   if(!g_stepModeActive || !InpAutoAdvance)
+      return;
+
+   // Check if enough time has passed for auto-advance
+   if(g_stepStartTime > 0 &&
+      TimeCurrent() - g_stepStartTime >= InpAutoAdvanceDelay)
+   {
+      AdvanceToNextStep();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Initialize Step Mode                                              |
+//+------------------------------------------------------------------+
+void InitStepMode()
+{
+   g_stepModeActive = true;
+   g_currentStep = STEP_NOT_STARTED;
+
+   // Reset all section reports
+   for(int i = 0; i < 12; i++)
+   {
+      g_sectionReports[i].analyzed = false;
+      g_sectionReports[i].confirmed = false;
+      g_sectionReports[i].summary = "";
+      g_sectionReports[i].timestamp = 0;
+   }
+
+   // Create step mode UI
+   CreateStepModeUI();
+
+   // Start timer for auto-advance if enabled
+   if(InpAutoAdvance)
+      EventSetTimer(1);  // 1 second timer
+
+   Print("═══════════════════════════════════════════════════════════");
+   Print("       DEBUG STEP MODE ACTIVATED                           ");
+   Print("       Click 'Continue' to advance through each section    ");
+   Print("═══════════════════════════════════════════════════════════");
+
+   // Start with first step
+   AdvanceToNextStep();
+}
+
+//+------------------------------------------------------------------+
+//| Advance to Next Initialization Step                               |
+//+------------------------------------------------------------------+
+void AdvanceToNextStep()
+{
+   // Mark current step as confirmed
+   if(g_currentStep > STEP_NOT_STARTED && g_currentStep < STEP_COMPLETE)
+   {
+      g_sectionReports[g_currentStep - 1].confirmed = true;
+      Print("✓ Section ", g_currentStep, " confirmed by user");
+   }
+
+   // Move to next step
+   g_currentStep = (ENUM_INIT_STEP)(g_currentStep + 1);
+   g_stepStartTime = TimeCurrent();
+
+   // Execute the current step
+   switch(g_currentStep)
+   {
+      case STEP_SECTION_1:
+         AnalyzeSection1_ATR();
+         break;
+      case STEP_SECTION_2:
+         AnalyzeSection2_EMA();
+         break;
+      case STEP_SECTION_3:
+         AnalyzeSection3_Structure();
+         break;
+      case STEP_SECTION_4:
+         AnalyzeSection4_SupplyDemand();
+         break;
+      case STEP_SECTION_5:
+         AnalyzeSection5_Liquidity();
+         break;
+      case STEP_SECTION_6:
+         AnalyzeSection6_Sessions();
+         break;
+      case STEP_SECTION_7:
+         AnalyzeSection7_FVG();
+         break;
+      case STEP_SECTION_8:
+         AnalyzeSection8_OrderBlocks();
+         break;
+      case STEP_SECTION_9:
+         AnalyzeSection9_Fibonacci();
+         break;
+      case STEP_SECTION_10:
+         AnalyzeSection10_Killzones();
+         break;
+      case STEP_SECTION_11:
+         AnalyzeSection11_Confluence();
+         break;
+      case STEP_COMPLETE:
+         CompleteStepMode();
+         break;
+   }
+
+   // Update UI
+   UpdateStepModeUI();
+}
+
+//+------------------------------------------------------------------+
+//| Section 1: ATR Analysis (Step Mode)                               |
+//+------------------------------------------------------------------+
+void AnalyzeSection1_ATR()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 1: ATR FILTER                                    ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   // Run ATR analysis via master module
+   // (ATR is analyzed as part of the master SMC)
+
+   string summary = "";
+   summary += "ATR Value: " + DoubleToString(g_sectionResults.atrValue, 2) + "\n";
+   summary += "ATR Pips: " + DoubleToString(g_sectionResults.atrPips, 1) + "\n";
+   summary += "Condition: " + g_sectionResults.volatilityCondition + "\n";
+   summary += "Trend: " + g_sectionResults.volatilityTrend + "\n";
+   summary += "Percentile: " + DoubleToString(g_sectionResults.atrPercentile, 1) + "%\n";
+   summary += "Filter: " + (g_sectionResults.atrFilterPass ? "PASS" : "FAIL");
+
+   g_sectionReports[0].analyzed = true;
+   g_sectionReports[0].summary = summary;
+   g_sectionReports[0].timestamp = TimeCurrent();
+
+   Print("║  ATR: ", DoubleToString(g_sectionResults.atrValue, 2),
+         " (", DoubleToString(g_sectionResults.atrPips, 1), " pips)");
+   Print("║  Condition: ", g_sectionResults.volatilityCondition);
+   Print("║  Trend: ", g_sectionResults.volatilityTrend);
+   Print("║  Percentile: ", DoubleToString(g_sectionResults.atrPercentile, 1), "%");
+   Print("║  Filter: ", g_sectionResults.atrFilterPass ? "PASS ✓" : "FAIL ✗");
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' or wait for auto-advance...");
+}
+
+//+------------------------------------------------------------------+
+//| Section 2: EMA Analysis (Step Mode)                               |
+//+------------------------------------------------------------------+
+void AnalyzeSection2_EMA()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 2: EMA ANALYSIS                                  ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   string summary = "";
+   summary += "EMA 50: " + DoubleToString(g_sectionResults.emaFast, 2) + "\n";
+   summary += "EMA 200: " + DoubleToString(g_sectionResults.emaSlow, 2) + "\n";
+   summary += "Trend Bias: " + g_sectionResults.emaTrendBias + "\n";
+   summary += "Bullish: " + (g_sectionResults.emaBullish ? "YES" : "NO") + "\n";
+   summary += "Bearish: " + (g_sectionResults.emaBearish ? "YES" : "NO");
+
+   g_sectionReports[1].analyzed = true;
+   g_sectionReports[1].summary = summary;
+   g_sectionReports[1].timestamp = TimeCurrent();
+
+   Print("║  EMA 50: ", DoubleToString(g_sectionResults.emaFast, 2));
+   Print("║  EMA 200: ", DoubleToString(g_sectionResults.emaSlow, 2));
+   Print("║  Trend Bias: ", g_sectionResults.emaTrendBias);
+   Print("║  Bullish: ", g_sectionResults.emaBullish ? "YES ✓" : "NO");
+   Print("║  Bearish: ", g_sectionResults.emaBearish ? "YES ✓" : "NO");
+   Print("║  Golden Cross: ", g_sectionResults.emaCrossoverBullish ? "YES" : "NO");
+   Print("║  Death Cross: ", g_sectionResults.emaCrossoverBearish ? "YES" : "NO");
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' or wait for auto-advance...");
+}
+
+//+------------------------------------------------------------------+
+//| Section 3: Market Structure (Step Mode)                           |
+//+------------------------------------------------------------------+
+void AnalyzeSection3_Structure()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 3: MARKET STRUCTURE                              ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   string trendStr = g_sectionResults.marketTrend == TREND_BULLISH ? "BULLISH" :
+                     g_sectionResults.marketTrend == TREND_BEARISH ? "BEARISH" : "RANGING";
+
+   string summary = "";
+   summary += "Trend: " + trendStr + "\n";
+   summary += "BOS: " + (g_sectionResults.bosConfirmed ? "CONFIRMED" : "NO") + "\n";
+   summary += "CHoCH: " + (g_sectionResults.chochDetected ? "DETECTED" : "NO") + "\n";
+   summary += "Swing High: " + DoubleToString(g_sectionResults.lastSwingHigh, 2) + "\n";
+   summary += "Swing Low: " + DoubleToString(g_sectionResults.lastSwingLow, 2);
+
+   g_sectionReports[2].analyzed = true;
+   g_sectionReports[2].summary = summary;
+   g_sectionReports[2].timestamp = TimeCurrent();
+
+   Print("║  Trend: ", trendStr);
+   Print("║  BOS: ", g_sectionResults.bosConfirmed ? "CONFIRMED ✓" : "NO");
+   Print("║  CHoCH: ", g_sectionResults.chochDetected ? "DETECTED ✓" : "NO");
+   Print("║  Swing High: ", DoubleToString(g_sectionResults.lastSwingHigh, 2));
+   Print("║  Swing Low: ", DoubleToString(g_sectionResults.lastSwingLow, 2));
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' or wait for auto-advance...");
+}
+
+//+------------------------------------------------------------------+
+//| Section 4: Supply/Demand (Step Mode)                              |
+//+------------------------------------------------------------------+
+void AnalyzeSection4_SupplyDemand()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 4: SUPPLY/DEMAND ZONES                           ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   string summary = "";
+   summary += "In Supply: " + (g_sectionResults.inSupplyZone ? "YES" : "NO") + "\n";
+   summary += "In Demand: " + (g_sectionResults.inDemandZone ? "YES" : "NO") + "\n";
+   summary += "Supply High: " + DoubleToString(g_sectionResults.supplyZoneHigh, 2) + "\n";
+   summary += "Demand Low: " + DoubleToString(g_sectionResults.demandZoneLow, 2);
+
+   g_sectionReports[3].analyzed = true;
+   g_sectionReports[3].summary = summary;
+   g_sectionReports[3].timestamp = TimeCurrent();
+
+   Print("║  In Supply Zone: ", g_sectionResults.inSupplyZone ? "YES ✓" : "NO");
+   Print("║  In Demand Zone: ", g_sectionResults.inDemandZone ? "YES ✓" : "NO");
+   Print("║  Supply High: ", DoubleToString(g_sectionResults.supplyZoneHigh, 2));
+   Print("║  Demand Low: ", DoubleToString(g_sectionResults.demandZoneLow, 2));
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' or wait for auto-advance...");
+}
+
+//+------------------------------------------------------------------+
+//| Section 5: Liquidity (Step Mode)                                  |
+//+------------------------------------------------------------------+
+void AnalyzeSection5_Liquidity()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 5: LIQUIDITY ANALYSIS                            ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   string summary = "";
+   summary += "Swept: " + (g_sectionResults.liquiditySwept ? "YES" : "NO") + "\n";
+   summary += "Level: " + DoubleToString(g_sectionResults.liquidityLevel, 2) + "\n";
+   summary += "EQL Taken: " + (g_sectionResults.eqlTaken ? "YES" : "NO") + "\n";
+   summary += "EQH Taken: " + (g_sectionResults.eqhTaken ? "YES" : "NO");
+
+   g_sectionReports[4].analyzed = true;
+   g_sectionReports[4].summary = summary;
+   g_sectionReports[4].timestamp = TimeCurrent();
+
+   Print("║  Liquidity Swept: ", g_sectionResults.liquiditySwept ? "YES ✓" : "NO");
+   Print("║  Level: ", DoubleToString(g_sectionResults.liquidityLevel, 2));
+   Print("║  EQL Taken: ", g_sectionResults.eqlTaken ? "YES" : "NO");
+   Print("║  EQH Taken: ", g_sectionResults.eqhTaken ? "YES" : "NO");
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' or wait for auto-advance...");
+}
+
+//+------------------------------------------------------------------+
+//| Section 6: Sessions (Step Mode)                                   |
+//+------------------------------------------------------------------+
+void AnalyzeSection6_Sessions()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 6: SESSION ANALYSIS                              ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   string sessionStr = g_sectionResults.currentSession == SESSION_LONDON ? "London" :
+                       g_sectionResults.currentSession == SESSION_NEWYORK ? "New York" :
+                       g_sectionResults.currentSession == SESSION_OVERLAP ? "Overlap" :
+                       g_sectionResults.currentSession == SESSION_ASIA ? "Asia" : "Off Hours";
+
+   string summary = "";
+   summary += "Session: " + sessionStr + "\n";
+   summary += "Active: " + (g_sectionResults.sessionActive ? "YES" : "NO") + "\n";
+   summary += "Killzone: " + (g_sectionResults.inKillzone ? "YES" : "NO");
+
+   g_sectionReports[5].analyzed = true;
+   g_sectionReports[5].summary = summary;
+   g_sectionReports[5].timestamp = TimeCurrent();
+
+   Print("║  Current Session: ", sessionStr);
+   Print("║  Active: ", g_sectionResults.sessionActive ? "YES ✓" : "NO");
+   Print("║  In Killzone: ", g_sectionResults.inKillzone ? "YES ✓" : "NO");
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' or wait for auto-advance...");
+}
+
+//+------------------------------------------------------------------+
+//| Section 7: FVG (Step Mode)                                        |
+//+------------------------------------------------------------------+
+void AnalyzeSection7_FVG()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 7: FAIR VALUE GAPS                               ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   string summary = "";
+   summary += "Bullish: " + IntegerToString(g_sectionResults.bullishFVGCount) + "\n";
+   summary += "Bearish: " + IntegerToString(g_sectionResults.bearishFVGCount) + "\n";
+   summary += "Mitigated: " + IntegerToString(g_sectionResults.mitigatedFVGCount) + "\n";
+   summary += "In FVG: " + (g_sectionResults.priceInFVG ? "YES" : "NO");
+
+   g_sectionReports[6].analyzed = true;
+   g_sectionReports[6].summary = summary;
+   g_sectionReports[6].timestamp = TimeCurrent();
+
+   Print("║  Bullish FVGs: ", g_sectionResults.bullishFVGCount);
+   Print("║  Bearish FVGs: ", g_sectionResults.bearishFVGCount);
+   Print("║  Mitigated: ", g_sectionResults.mitigatedFVGCount);
+   Print("║  Price In FVG: ", g_sectionResults.priceInFVG ? "YES ✓" : "NO");
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' or wait for auto-advance...");
+}
+
+//+------------------------------------------------------------------+
+//| Section 8: Order Blocks (Step Mode)                               |
+//+------------------------------------------------------------------+
+void AnalyzeSection8_OrderBlocks()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 8: ORDER BLOCKS                                  ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   string summary = "";
+   summary += "Bullish OB: " + (g_sectionResults.bullishOBPresent ? "YES" : "NO") + "\n";
+   summary += "Bearish OB: " + (g_sectionResults.bearishOBPresent ? "YES" : "NO") + "\n";
+   summary += "In OB: " + (g_sectionResults.priceInOB ? "YES" : "NO") + "\n";
+   summary += "Fresh: " + (g_sectionResults.obFresh ? "YES" : "NO");
+
+   g_sectionReports[7].analyzed = true;
+   g_sectionReports[7].summary = summary;
+   g_sectionReports[7].timestamp = TimeCurrent();
+
+   Print("║  Bullish OB: ", g_sectionResults.bullishOBPresent ? "YES ✓" : "NO");
+   Print("║  Bearish OB: ", g_sectionResults.bearishOBPresent ? "YES ✓" : "NO");
+   Print("║  Price In OB: ", g_sectionResults.priceInOB ? "YES ✓" : "NO");
+   Print("║  OB Fresh: ", g_sectionResults.obFresh ? "YES" : "NO");
+   if(g_sectionResults.bullishOBPresent || g_sectionResults.bearishOBPresent)
+      Print("║  OB Range: ", DoubleToString(g_sectionResults.obLow, 2),
+            " - ", DoubleToString(g_sectionResults.obHigh, 2));
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' or wait for auto-advance...");
+}
+
+//+------------------------------------------------------------------+
+//| Section 9: Fibonacci/OTE (Step Mode)                              |
+//+------------------------------------------------------------------+
+void AnalyzeSection9_Fibonacci()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 9: FIBONACCI / OTE ZONE                          ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   string summary = "";
+   summary += "In OTE: " + (g_sectionResults.inOTEZone ? "YES" : "NO") + "\n";
+   summary += "Fib Level: " + DoubleToString(g_sectionResults.currentFibLevel * 100, 1) + "%\n";
+   summary += "OTE High: " + DoubleToString(g_sectionResults.oteHigh, 2) + "\n";
+   summary += "OTE Low: " + DoubleToString(g_sectionResults.oteLow, 2);
+
+   g_sectionReports[8].analyzed = true;
+   g_sectionReports[8].summary = summary;
+   g_sectionReports[8].timestamp = TimeCurrent();
+
+   Print("║  In OTE Zone: ", g_sectionResults.inOTEZone ? "YES ✓" : "NO");
+   Print("║  Current Fib: ", DoubleToString(g_sectionResults.currentFibLevel * 100, 1), "%");
+   Print("║  OTE High: ", DoubleToString(g_sectionResults.oteHigh, 2));
+   Print("║  OTE Low: ", DoubleToString(g_sectionResults.oteLow, 2));
+   Print("║  Golden Pocket: ", DoubleToString(g_sectionResults.goldenPocket618, 2));
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' or wait for auto-advance...");
+}
+
+//+------------------------------------------------------------------+
+//| Section 10: Killzones/HTF-LTF (Step Mode)                         |
+//+------------------------------------------------------------------+
+void AnalyzeSection10_Killzones()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 10: KILLZONES / HTF-LTF ALIGNMENT                ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   string summary = "";
+   summary += "HTF Aligned: " + (g_sectionResults.htfLtfAligned ? "YES" : "NO") + "\n";
+   summary += "LTF Entry: " + (g_sectionResults.ltfEntryValid ? "YES" : "NO") + "\n";
+   summary += "In Killzone: " + (g_sectionResults.inKillzone ? "YES" : "NO");
+
+   g_sectionReports[9].analyzed = true;
+   g_sectionReports[9].summary = summary;
+   g_sectionReports[9].timestamp = TimeCurrent();
+
+   Print("║  HTF-LTF Aligned: ", g_sectionResults.htfLtfAligned ? "YES ✓" : "NO");
+   Print("║  LTF Entry Valid: ", g_sectionResults.ltfEntryValid ? "YES ✓" : "NO");
+   Print("║  In Killzone: ", g_sectionResults.inKillzone ? "YES ✓" : "NO");
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' or wait for auto-advance...");
+}
+
+//+------------------------------------------------------------------+
+//| Section 11: Confluence (Step Mode)                                |
+//+------------------------------------------------------------------+
+void AnalyzeSection11_Confluence()
+{
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  SECTION 11: CONFLUENCE SCORING                           ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   string strengthStr = g_sectionResults.signalStrong ? "STRONG" :
+                        g_sectionResults.signalModerate ? "MODERATE" :
+                        g_sectionResults.signalWeak ? "WEAK" : "NONE";
+
+   string summary = "";
+   summary += "Score: " + IntegerToString(g_sectionResults.confluenceScore) + "/10\n";
+   summary += "Strength: " + strengthStr + "\n";
+   summary += "Trade Valid: " + (g_sectionResults.confluenceScore >= InpMinConfluence ? "YES" : "NO");
+
+   g_sectionReports[10].analyzed = true;
+   g_sectionReports[10].summary = summary;
+   g_sectionReports[10].timestamp = TimeCurrent();
+
+   Print("║  Confluence Score: ", g_sectionResults.confluenceScore, "/10");
+   Print("║  Signal Strength: ", strengthStr);
+   Print("║  Min Required: ", InpMinConfluence, "/10");
+   Print("║  Trade Valid: ", g_sectionResults.confluenceScore >= InpMinConfluence ? "YES ✓" : "NO ✗");
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print(">> Click 'Continue' to complete initialization...");
+}
+
+//+------------------------------------------------------------------+
+//| Complete Step Mode                                                |
+//+------------------------------------------------------------------+
+void CompleteStepMode()
+{
+   g_stepModeActive = false;
+
+   // Kill timer
+   EventKillTimer();
+
+   Print("");
+   Print("╔═══════════════════════════════════════════════════════════╗");
+   Print("║  ALL SECTIONS INITIALIZED & CONFIRMED                     ║");
+   Print("╠═══════════════════════════════════════════════════════════╣");
+
+   // Print summary of all sections
+   Print("║  SECTION SUMMARY:");
+   for(int i = 0; i < 11; i++)
+   {
+      string status = g_sectionReports[i].confirmed ? "✓ CONFIRMED" : "○ ANALYZED";
+      Print("║    Section ", i+1, ": ", status);
+   }
+
+   Print("╠═══════════════════════════════════════════════════════════╣");
+   Print("║  Confluence Score: ", g_sectionResults.confluenceScore, "/10");
+   Print("║  Ready for Trading: ", g_sectionResults.confluenceScore >= InpMinConfluence ? "YES" : "NO");
+   Print("╚═══════════════════════════════════════════════════════════╝");
+   Print("");
+
+   // Set status
+   g_status.statusMessage = "Step Mode Complete - Ready";
+
+   // Hide step mode UI, show normal panel
+   DeleteStepModeUI();
+
+   if(InpShowMasterPanel)
+      UpdatePanel();
+}
+
+//+------------------------------------------------------------------+
+//| Create Step Mode UI                                               |
+//+------------------------------------------------------------------+
+void CreateStepModeUI()
+{
+   int x = 350;
+   int y = InpPanelY;
+   int width = 280;
+   int height = 200;
+
+   // Background
+   ObjectCreate(0, g_stepPanelName + "_BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, g_stepPanelName + "_BG", OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, g_stepPanelName + "_BG", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, g_stepPanelName + "_BG", OBJPROP_XSIZE, width);
+   ObjectSetInteger(0, g_stepPanelName + "_BG", OBJPROP_YSIZE, height);
+   ObjectSetInteger(0, g_stepPanelName + "_BG", OBJPROP_BGCOLOR, clrDarkSlateGray);
+   ObjectSetInteger(0, g_stepPanelName + "_BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, g_stepPanelName + "_BG", OBJPROP_COLOR, clrGold);
+   ObjectSetInteger(0, g_stepPanelName + "_BG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+
+   // Title
+   CreateLabel(g_stepPanelName + "_Title", "DEBUG STEP MODE", x + 10, y + 5, clrGold, 11, true);
+
+   // Current step label
+   CreateLabel(g_stepPanelName + "_Step", "Step: Initializing...", x + 10, y + 30, clrWhite, 10, false);
+
+   // Status label
+   CreateLabel(g_stepPanelName + "_Status", "Status: Waiting", x + 10, y + 55, clrLime, 9, false);
+
+   // Progress label
+   CreateLabel(g_stepPanelName + "_Progress", "Progress: 0/11", x + 10, y + 80, clrCyan, 9, false);
+
+   // Auto-advance status
+   string autoStr = InpAutoAdvance ? "ON (" + IntegerToString(InpAutoAdvanceDelay) + "s)" : "OFF";
+   CreateLabel(g_stepPanelName + "_Auto", "Auto-advance: " + autoStr, x + 10, y + 105, clrSilver, 8, false);
+
+   // Continue button
+   ObjectCreate(0, g_continueButtonName, OBJ_BUTTON, 0, 0, 0);
+   ObjectSetInteger(0, g_continueButtonName, OBJPROP_XDISTANCE, x + 40);
+   ObjectSetInteger(0, g_continueButtonName, OBJPROP_YDISTANCE, y + 135);
+   ObjectSetInteger(0, g_continueButtonName, OBJPROP_XSIZE, 200);
+   ObjectSetInteger(0, g_continueButtonName, OBJPROP_YSIZE, 40);
+   ObjectSetString(0, g_continueButtonName, OBJPROP_TEXT, "▶ CONTINUE");
+   ObjectSetInteger(0, g_continueButtonName, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, g_continueButtonName, OBJPROP_BGCOLOR, clrDarkGreen);
+   ObjectSetInteger(0, g_continueButtonName, OBJPROP_BORDER_COLOR, clrLime);
+   ObjectSetInteger(0, g_continueButtonName, OBJPROP_FONTSIZE, 12);
+   ObjectSetString(0, g_continueButtonName, OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, g_continueButtonName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+
+   ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//| Update Step Mode UI                                               |
+//+------------------------------------------------------------------+
+void UpdateStepModeUI()
+{
+   if(!g_stepModeActive) return;
+
+   // Step names
+   string stepNames[] = {"Not Started", "ATR Filter", "EMA Analysis", "Market Structure",
+                         "Supply/Demand", "Liquidity", "Sessions", "FVG",
+                         "Order Blocks", "Fibonacci", "Killzones", "Confluence", "Complete"};
+
+   // Update step label
+   string stepText = "Step: Section " + IntegerToString(g_currentStep) + " - " + stepNames[g_currentStep];
+   ObjectSetString(0, g_stepPanelName + "_Step", OBJPROP_TEXT, stepText);
+
+   // Update status
+   string statusText = "Status: Analyzing...";
+   if(g_currentStep > STEP_NOT_STARTED && g_currentStep <= STEP_SECTION_11)
+   {
+      if(g_sectionReports[g_currentStep - 1].analyzed)
+         statusText = "Status: Ready for confirmation";
+   }
+   ObjectSetString(0, g_stepPanelName + "_Status", OBJPROP_TEXT, statusText);
+
+   // Update progress
+   int progress = (g_currentStep == STEP_NOT_STARTED) ? 0 : (int)g_currentStep;
+   string progressText = "Progress: " + IntegerToString(progress) + "/11";
+   ObjectSetString(0, g_stepPanelName + "_Progress", OBJPROP_TEXT, progressText);
+
+   // Update button text based on step
+   if(g_currentStep == STEP_SECTION_11)
+      ObjectSetString(0, g_continueButtonName, OBJPROP_TEXT, "✓ COMPLETE");
+   else
+      ObjectSetString(0, g_continueButtonName, OBJPROP_TEXT, "▶ CONTINUE");
+
+   ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//| Delete Step Mode UI                                               |
+//+------------------------------------------------------------------+
+void DeleteStepModeUI()
+{
+   ObjectDelete(0, g_continueButtonName);
+   ObjectsDeleteAll(0, g_stepPanelName);
+   ChartRedraw();
 }
 
 //+------------------------------------------------------------------+
@@ -1081,6 +1752,18 @@ void ProcessSignal()
    if(!g_analysis.signalValid) return;
    if(InpEAMode == MODE_ANALYSIS_ONLY) return;
 
+   // Check spread before execution
+   double currentSpread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double maxAllowedSpread = g_sectionResults.atrValue * 0.1;  // Max 10% of ATR
+
+   if(currentSpread > maxAllowedSpread)
+   {
+      Print("⚠ Trade skipped - Spread too high: ", DoubleToString(currentSpread, _Digits),
+            " > Max: ", DoubleToString(maxAllowedSpread, _Digits));
+      g_status.statusMessage = "Spread Too High";
+      return;
+   }
+
    // Calculate lot size based on risk
    double riskDistance = MathAbs(g_analysis.entryPrice - g_analysis.stopLoss);
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -1644,6 +2327,20 @@ void PrintInitialization()
    else
    {
       Print("║   Filter: DISABLED (All dates processed)");
+   }
+   Print("╠═══════════════════════════════════════════════════════════╣");
+   Print("║ DEBUG STEP MODE:");
+   if(InpDebugStepMode)
+   {
+      Print("║   Mode: ENABLED");
+      Print("║   Auto-Advance: ", InpAutoAdvance ? "ON" : "OFF");
+      if(InpAutoAdvance)
+         Print("║   Delay: ", InpAutoAdvanceDelay, " seconds");
+      Print("║   Sections will initialize one-by-one with confirmation");
+   }
+   else
+   {
+      Print("║   Mode: DISABLED (Normal initialization)");
    }
    Print("╚═══════════════════════════════════════════════════════════╝");
    Print("");
