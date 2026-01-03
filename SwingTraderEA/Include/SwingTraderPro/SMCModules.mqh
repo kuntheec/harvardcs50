@@ -442,15 +442,25 @@ public:
 
       double currentPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
 
-      // Copy close buffer for mitigation check
-      CopyClose(m_symbol, m_timeframe, 0, 10, m_closeBuffer);
+      // Copy close buffer for mitigation check (with error handling)
+      int closeCopied = CopyClose(m_symbol, m_timeframe, 0, 10, m_closeBuffer);
+      if(closeCopied <= 0)
+      {
+         Print("⚠ FVG: Failed to copy close buffer, error: ", GetLastError());
+         return;  // Cannot analyze without price data
+      }
 
-      // Copy ATR for filtering
+      // Copy ATR for filtering (with error handling)
       double atrValues[];
       ArraySetAsSeries(atrValues, true);
       if(m_requireStrongMove && m_atrHandle != INVALID_HANDLE)
       {
-         CopyBuffer(m_atrHandle, 0, 0, m_lookback, atrValues);
+         int atrCopied = CopyBuffer(m_atrHandle, 0, 0, m_lookback, atrValues);
+         if(atrCopied <= 0)
+         {
+            Print("⚠ FVG: Failed to copy ATR buffer, continuing without ATR filter");
+            m_requireStrongMove = false;  // Disable ATR filter if failed
+         }
       }
 
       for(int i = 2; i < m_lookback - 2; i++)
@@ -616,11 +626,28 @@ public:
       g_sectionResults.priceInOB = false;
       g_sectionResults.obFresh = false;
 
-      CopyBuffer(m_atrHandle, 0, 0, 3, m_atrBuffer);
+      // Error handling for CopyBuffer
+      int copied = CopyBuffer(m_atrHandle, 0, 0, 3, m_atrBuffer);
+      if(copied <= 0)
+      {
+         Print("⚠ OB: Failed to copy ATR buffer, error: ", GetLastError());
+         return;
+      }
+
       double atr = m_atrBuffer[0];
       double currentPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
 
-      for(int i = 1; i < m_lookback - 1; i++)
+      // Determine which OB type to prioritize based on market trend
+      // Only show the dominant direction to avoid conflicting signals
+      bool lookForBullish = (g_sectionResults.marketTrend == TREND_BULLISH ||
+                             g_sectionResults.marketTrend == TREND_RANGING);
+      bool lookForBearish = (g_sectionResults.marketTrend == TREND_BEARISH ||
+                             g_sectionResults.marketTrend == TREND_RANGING);
+
+      // In ranging market, pick first OB found and stop
+      bool foundOB = false;
+
+      for(int i = 1; i < m_lookback - 1 && !foundOB; i++)
       {
          double open = iOpen(m_symbol, m_timeframe, i);
          double close = iClose(m_symbol, m_timeframe, i);
@@ -632,7 +659,7 @@ public:
          double body = MathAbs(close - open);
 
          // Bullish OB: Last bearish candle before strong bullish move
-         if(close < open && nextClose > high && body > atr * 0.3)
+         if(lookForBullish && close < open && nextClose > high && body > atr * 0.3)
          {
             g_sectionResults.bullishOBPresent = true;
             g_sectionResults.obHigh = open;
@@ -641,14 +668,17 @@ public:
             g_sectionResults.obFresh = (i <= 5);
 
             if(currentPrice >= close && currentPrice <= open)
-            {
                g_sectionResults.priceInOB = true;
-               break;
-            }
+
+            // In bullish trend, we found our OB - stop looking
+            if(g_sectionResults.marketTrend == TREND_BULLISH)
+               foundOB = true;
+            else if(g_sectionResults.marketTrend == TREND_RANGING && g_sectionResults.priceInOB)
+               foundOB = true;  // In ranging, stop if price is in OB
          }
 
          // Bearish OB: Last bullish candle before strong bearish move
-         if(close > open && nextClose < low && body > atr * 0.3)
+         if(lookForBearish && !foundOB && close > open && nextClose < low && body > atr * 0.3)
          {
             g_sectionResults.bearishOBPresent = true;
             g_sectionResults.obHigh = close;
@@ -657,10 +687,13 @@ public:
             g_sectionResults.obFresh = (i <= 5);
 
             if(currentPrice >= open && currentPrice <= close)
-            {
                g_sectionResults.priceInOB = true;
-               break;
-            }
+
+            // In bearish trend, we found our OB - stop looking
+            if(g_sectionResults.marketTrend == TREND_BEARISH)
+               foundOB = true;
+            else if(g_sectionResults.marketTrend == TREND_RANGING && g_sectionResults.priceInOB)
+               foundOB = true;
          }
       }
    }
@@ -942,11 +975,19 @@ public:
 
    void Analyze()
    {
-      if(m_atrHandle == INVALID_HANDLE) return;
+      if(m_atrHandle == INVALID_HANDLE)
+      {
+         Print("⚠ ATR: Invalid handle, skipping analysis");
+         return;
+      }
 
-      // Copy ATR buffer
+      // Copy ATR buffer (with error handling)
       int copied = CopyBuffer(m_atrHandle, 0, 0, m_percentileBars + 10, m_atrBuffer);
-      if(copied < m_percentileBars) return;
+      if(copied < m_percentileBars)
+      {
+         Print("⚠ ATR: Failed to copy buffer, got ", copied, " bars, need ", m_percentileBars);
+         return;
+      }
 
       // Current ATR value
       g_sectionResults.atrValue = m_atrBuffer[0];
@@ -1177,6 +1218,19 @@ public:
       // HTF/LTF Alignment (+1)
       if(g_sectionResults.htfLtfAligned)
          score += 1;
+
+      // EMA Trend Alignment (+1) - Added per Grok's recommendation
+      // Add point if EMA confirms the market trend direction
+      if(g_sectionResults.marketTrend == TREND_BULLISH && g_sectionResults.emaBullish)
+      {
+         score += 1;
+         g_sectionResults.bullishFactors++;
+      }
+      else if(g_sectionResults.marketTrend == TREND_BEARISH && g_sectionResults.emaBearish)
+      {
+         score += 1;
+         g_sectionResults.bearishFactors++;
+      }
 
       g_sectionResults.confluenceScore = MathMin(score, 10);
 

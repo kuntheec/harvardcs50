@@ -322,7 +322,7 @@ int OnInit()
 
    // Run initial analysis immediately (don't wait for new bar)
    CopyBuffer(g_atrHandle, 0, 0, 3, g_atrBuffer);
-   RunSMCAnalysis();
+   RunSMCAnalysis(false);  // false = skip debug print during init (will print on first tick)
    Print("✓ Initial SMC Analysis Complete");
 
    // Check if Debug Step Mode is enabled
@@ -1090,7 +1090,7 @@ void DeleteStepModeUI()
 //+------------------------------------------------------------------+
 //| Run Full SMC Analysis - Uses Real Section Modules                 |
 //+------------------------------------------------------------------+
-void RunSMCAnalysis()
+void RunSMCAnalysis(bool printDebug = true)
 {
    ZeroMemory(g_analysis);
 
@@ -1104,8 +1104,9 @@ void RunSMCAnalysis()
    // Generate final signal based on all section data
    GenerateSignal();
 
-   // Debug: Print all section values
-   PrintSMCDebug();
+   // Debug: Print all section values (skip on init to avoid duplicate)
+   if(printDebug)
+      PrintSMCDebug();
 }
 
 //+------------------------------------------------------------------+
