@@ -121,12 +121,29 @@ struct SectionResults
    bool              signalModerate;
    bool              signalWeak;
 
-   // Section 12: Risk
+   // Section 12: Risk Management
    double            recommendedLotSize;
    double            riskPercent;
    bool              canTrade;
    bool              inRecoveryMode;
    double            currentExposure;
+   // Enhanced Risk Management fields
+   double            accountBalance;
+   double            accountEquity;
+   double            accountFreeMargin;
+   double            marginLevel;
+   double            currentDrawdownPercent;
+   double            dailyPnLPercent;
+   double            maxRiskAmount;
+   double            stopLossDistance;
+   double            riskRewardRatio;
+   string            riskStatus;              // "OK", "WARNING", "BLOCKED"
+   string            blockReason;             // Reason if blocked
+   int               openPositions;
+   double            totalRiskExposure;       // Total risk across all positions
+   bool              marginOK;                // Sufficient margin available
+   bool              drawdownOK;              // Within drawdown limits
+   bool              dailyLossOK;             // Within daily loss limits
 
    // Section 1: ATR Filter (from Section01_ATRFilter.mq5)
    double            atrValue;
@@ -153,6 +170,14 @@ struct SectionResults
    bool              emaCrossoverBullish;      // Recent golden cross
    bool              emaCrossoverBearish;      // Recent death cross
    string            emaTrendBias;             // "BULLISH", "BEARISH", "NEUTRAL"
+   // Enhanced EMA fields
+   int               emaCrossoverBarsAgo;      // Bars since last crossover
+   double            emaTrendStrength;         // Trend strength 0-100 based on slope
+   string            emaTrendStrengthLabel;    // "WEAK", "MODERATE", "STRONG"
+   bool              emaStackedBullish;        // Price > Fast > Slow (stacked)
+   bool              emaStackedBearish;        // Price < Fast < Slow (stacked)
+   double            emaPriceDistance;         // Distance from price to nearest EMA
+   double            emaPriceDistanceATR;      // Price distance as ATR multiple
 
    // Section 6: MACD/RSI Momentum Analysis
    double            macdMain;                 // MACD main line
@@ -1143,9 +1168,10 @@ public:
       g_sectionResults.emaBullish = (currentPrice > m_emaFastBuffer[0] && currentPrice > m_emaSlowBuffer[0]);
       g_sectionResults.emaBearish = (currentPrice < m_emaFastBuffer[0] && currentPrice < m_emaSlowBuffer[0]);
 
-      // Crossover detection
+      // Crossover detection with bars ago tracking
       g_sectionResults.emaCrossoverBullish = false;
       g_sectionResults.emaCrossoverBearish = false;
+      g_sectionResults.emaCrossoverBarsAgo = -1;  // -1 means no recent crossover
 
       for(int i = 0; i < m_crossoverLookback; i++)
       {
@@ -1154,6 +1180,7 @@ public:
             m_emaFastBuffer[i+1] <= m_emaSlowBuffer[i+1])
          {
             g_sectionResults.emaCrossoverBullish = true;
+            g_sectionResults.emaCrossoverBarsAgo = i;
             break;
          }
          // Death cross: Fast crosses below Slow
@@ -1161,6 +1188,7 @@ public:
             m_emaFastBuffer[i+1] >= m_emaSlowBuffer[i+1])
          {
             g_sectionResults.emaCrossoverBearish = true;
+            g_sectionResults.emaCrossoverBarsAgo = i;
             break;
          }
       }
@@ -1172,7 +1200,72 @@ public:
          g_sectionResults.emaTrendBias = "BEARISH";
       else
          g_sectionResults.emaTrendBias = "NEUTRAL";
+
+      // === Enhanced EMA Analysis ===
+
+      // Stacked EMAs (strong trend confirmation)
+      g_sectionResults.emaStackedBullish = (currentPrice > m_emaFastBuffer[0] &&
+                                             m_emaFastBuffer[0] > m_emaSlowBuffer[0]);
+      g_sectionResults.emaStackedBearish = (currentPrice < m_emaFastBuffer[0] &&
+                                             m_emaFastBuffer[0] < m_emaSlowBuffer[0]);
+
+      // Distance from price to nearest EMA
+      double distToFast = MathAbs(currentPrice - m_emaFastBuffer[0]);
+      double distToSlow = MathAbs(currentPrice - m_emaSlowBuffer[0]);
+      g_sectionResults.emaPriceDistance = MathMin(distToFast, distToSlow);
+
+      // Price distance as ATR multiple (if ATR is available)
+      if(g_sectionResults.atrValue > 0)
+         g_sectionResults.emaPriceDistanceATR = g_sectionResults.emaPriceDistance / g_sectionResults.atrValue;
+      else
+         g_sectionResults.emaPriceDistanceATR = 0;
+
+      // Calculate trend strength based on EMA slope and alignment
+      CalculateTrendStrength(currentPrice);
    }
+
+private:
+   void CalculateTrendStrength(double currentPrice)
+   {
+      // Trend strength factors:
+      // 1. Slope magnitude (steeper = stronger)
+      // 2. Both EMAs sloping same direction
+      // 3. Price position (stacked EMAs)
+      // 4. EMA spread (wider = stronger trend)
+
+      double strengthScore = 0;
+
+      // Normalize slopes to a comparable scale
+      double slopeNorm = (MathAbs(g_sectionResults.emaFastSlope) + MathAbs(g_sectionResults.emaSlowSlope)) / 2;
+      double slopeStrength = MathMin(slopeNorm / (g_sectionResults.atrValue > 0 ? g_sectionResults.atrValue * 0.01 : 0.0001), 1.0);
+      strengthScore += slopeStrength * 30;  // Up to 30 points for slope
+
+      // Both EMAs sloping same direction
+      bool sameDirection = (g_sectionResults.emaFastSlope > 0 && g_sectionResults.emaSlowSlope > 0) ||
+                           (g_sectionResults.emaFastSlope < 0 && g_sectionResults.emaSlowSlope < 0);
+      if(sameDirection)
+         strengthScore += 20;  // 20 points for alignment
+
+      // Stacked EMAs (strongest confirmation)
+      if(g_sectionResults.emaStackedBullish || g_sectionResults.emaStackedBearish)
+         strengthScore += 30;  // 30 points for stacked
+
+      // EMA spread contribution
+      double spreadStrength = MathMin(MathAbs(g_sectionResults.emaSpreadPercent) / 0.5, 1.0);
+      strengthScore += spreadStrength * 20;  // Up to 20 points for spread
+
+      g_sectionResults.emaTrendStrength = MathMin(strengthScore, 100);
+
+      // Label the strength
+      if(g_sectionResults.emaTrendStrength >= 70)
+         g_sectionResults.emaTrendStrengthLabel = "STRONG";
+      else if(g_sectionResults.emaTrendStrength >= 40)
+         g_sectionResults.emaTrendStrengthLabel = "MODERATE";
+      else
+         g_sectionResults.emaTrendStrengthLabel = "WEAK";
+   }
+
+public:
 
    // Getters
    double GetEMAFast() { return g_sectionResults.emaFast; }
@@ -1182,6 +1275,13 @@ public:
    string GetTrendBias() { return g_sectionResults.emaTrendBias; }
    bool HasGoldenCross() { return g_sectionResults.emaCrossoverBullish; }
    bool HasDeathCross() { return g_sectionResults.emaCrossoverBearish; }
+   // Enhanced getters
+   int GetCrossoverBarsAgo() { return g_sectionResults.emaCrossoverBarsAgo; }
+   double GetTrendStrength() { return g_sectionResults.emaTrendStrength; }
+   string GetTrendStrengthLabel() { return g_sectionResults.emaTrendStrengthLabel; }
+   bool IsStackedBullish() { return g_sectionResults.emaStackedBullish; }
+   bool IsStackedBearish() { return g_sectionResults.emaStackedBearish; }
+   double GetPriceDistanceATR() { return g_sectionResults.emaPriceDistanceATR; }
 };
 
 //+------------------------------------------------------------------+
@@ -1452,6 +1552,324 @@ public:
 };
 
 //+------------------------------------------------------------------+
+//| Section 12: Risk Management Module                                |
+//+------------------------------------------------------------------+
+class CRiskManagement
+{
+private:
+   string            m_symbol;
+   ENUM_TIMEFRAMES   m_timeframe;
+
+   // Risk parameters
+   double            m_baseRiskPercent;
+   double            m_maxRiskPercent;
+   double            m_minRiskPercent;
+   double            m_maxDailyLossPercent;
+   double            m_maxDrawdownPercent;
+   double            m_minLots;
+   double            m_maxLots;
+
+   // Account tracking
+   double            m_startingBalance;
+   double            m_dailyStartBalance;
+   datetime          m_lastDayCheck;
+
+public:
+   void Init(string symbol, ENUM_TIMEFRAMES tf,
+             double baseRisk = 1.0, double maxRisk = 2.0, double minRisk = 0.5,
+             double maxDailyLoss = 5.0, double maxDrawdown = 20.0)
+   {
+      m_symbol = symbol;
+      m_timeframe = tf;
+      m_baseRiskPercent = baseRisk;
+      m_maxRiskPercent = maxRisk;
+      m_minRiskPercent = minRisk;
+      m_maxDailyLossPercent = maxDailyLoss;
+      m_maxDrawdownPercent = maxDrawdown;
+
+      // Get lot constraints from symbol
+      m_minLots = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+      m_maxLots = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+
+      // Initialize balance tracking
+      m_startingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      m_dailyStartBalance = m_startingBalance;
+      m_lastDayCheck = TimeCurrent();
+   }
+
+   void Analyze()
+   {
+      // Reset risk status
+      g_sectionResults.canTrade = true;
+      g_sectionResults.riskStatus = "OK";
+      g_sectionResults.blockReason = "";
+
+      // Get account info
+      g_sectionResults.accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      g_sectionResults.accountEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+      g_sectionResults.accountFreeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+
+      // Calculate margin level
+      double marginUsed = AccountInfoDouble(ACCOUNT_MARGIN);
+      if(marginUsed > 0)
+         g_sectionResults.marginLevel = (g_sectionResults.accountEquity / marginUsed) * 100;
+      else
+         g_sectionResults.marginLevel = 9999;  // No margin used
+
+      // Check for day reset
+      CheckDayReset();
+
+      // Calculate drawdown
+      g_sectionResults.currentDrawdownPercent = 0;
+      if(m_startingBalance > 0)
+      {
+         double maxBalance = MathMax(m_startingBalance, g_sectionResults.accountBalance);
+         g_sectionResults.currentDrawdownPercent =
+            ((maxBalance - g_sectionResults.accountEquity) / maxBalance) * 100;
+      }
+
+      // Calculate daily P&L
+      g_sectionResults.dailyPnLPercent = 0;
+      if(m_dailyStartBalance > 0)
+      {
+         g_sectionResults.dailyPnLPercent =
+            ((g_sectionResults.accountBalance - m_dailyStartBalance) / m_dailyStartBalance) * 100;
+      }
+
+      // Count open positions and calculate exposure
+      g_sectionResults.openPositions = PositionsTotal();
+      CalculateExposure();
+
+      // Determine risk percent based on confluence score
+      DetermineRiskPercent();
+
+      // Calculate recommended lot size
+      CalculateLotSize();
+
+      // Check all risk limits
+      CheckRiskLimits();
+
+      // Final validation
+      ValidateMargin();
+   }
+
+private:
+   void CheckDayReset()
+   {
+      MqlDateTime currentTime, lastCheck;
+      TimeToStruct(TimeCurrent(), currentTime);
+      TimeToStruct(m_lastDayCheck, lastCheck);
+
+      if(currentTime.day != lastCheck.day || currentTime.mon != lastCheck.mon)
+      {
+         m_dailyStartBalance = g_sectionResults.accountBalance;
+         m_lastDayCheck = TimeCurrent();
+      }
+   }
+
+   void CalculateExposure()
+   {
+      g_sectionResults.currentExposure = 0;
+      g_sectionResults.totalRiskExposure = 0;
+
+      for(int i = 0; i < PositionsTotal(); i++)
+      {
+         if(PositionSelectByTicket(PositionGetTicket(i)))
+         {
+            double positionRisk = PositionGetDouble(POSITION_VOLUME) *
+                                  SymbolInfoDouble(PositionGetString(POSITION_SYMBOL), SYMBOL_TRADE_CONTRACT_SIZE);
+            g_sectionResults.currentExposure += positionRisk;
+
+            // Estimate risk based on SL distance if available
+            double sl = PositionGetDouble(POSITION_SL);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            if(sl > 0 && openPrice > 0)
+            {
+               double riskPips = MathAbs(openPrice - sl) / SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+               double pipValue = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_VALUE);
+               g_sectionResults.totalRiskExposure +=
+                  PositionGetDouble(POSITION_VOLUME) * riskPips * pipValue;
+            }
+         }
+      }
+
+      // Convert to percentage of balance
+      if(g_sectionResults.accountBalance > 0)
+         g_sectionResults.totalRiskExposure =
+            (g_sectionResults.totalRiskExposure / g_sectionResults.accountBalance) * 100;
+   }
+
+   void DetermineRiskPercent()
+   {
+      // Base risk adjusted by confluence score
+      double riskPercent = m_baseRiskPercent;
+
+      // Confluence-based adjustment
+      if(g_sectionResults.signalStrong)
+         riskPercent = m_maxRiskPercent;
+      else if(g_sectionResults.signalModerate)
+         riskPercent = m_baseRiskPercent;
+      else if(g_sectionResults.signalWeak)
+         riskPercent = m_minRiskPercent;
+      else
+         riskPercent = m_minRiskPercent * 0.5;  // Very weak signal
+
+      // Reduce risk in recovery mode
+      if(g_sectionResults.inRecoveryMode)
+         riskPercent *= 0.5;
+
+      // Reduce risk if already exposed
+      if(g_sectionResults.openPositions > 0)
+         riskPercent *= 0.75;
+
+      // Clamp to limits
+      g_sectionResults.riskPercent = MathMax(m_minRiskPercent * 0.5,
+                                              MathMin(riskPercent, m_maxRiskPercent));
+
+      // Calculate max risk amount in currency
+      g_sectionResults.maxRiskAmount = g_sectionResults.accountBalance *
+                                        (g_sectionResults.riskPercent / 100);
+   }
+
+   void CalculateLotSize()
+   {
+      // Use ATR for stop loss distance if available
+      if(g_sectionResults.atrValue > 0)
+         g_sectionResults.stopLossDistance = g_sectionResults.atrValue * 1.5;  // 1.5x ATR
+      else
+         g_sectionResults.stopLossDistance = 50 * SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+
+      // Calculate pip value
+      double tickValue = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_VALUE);
+      double tickSize = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
+      double pipValue = tickValue * (SymbolInfoDouble(m_symbol, SYMBOL_POINT) / tickSize);
+
+      // Calculate stop loss in pips
+      double slPips = g_sectionResults.stopLossDistance / SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+
+      // Calculate lot size: Risk Amount / (SL pips * pip value)
+      double lots = 0;
+      if(slPips > 0 && pipValue > 0)
+         lots = g_sectionResults.maxRiskAmount / (slPips * pipValue);
+
+      // Normalize to lot step
+      double lotStep = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
+      lots = MathFloor(lots / lotStep) * lotStep;
+
+      // Clamp to min/max
+      g_sectionResults.recommendedLotSize = MathMax(m_minLots, MathMin(lots, m_maxLots));
+
+      // Calculate actual R:R if we have TP targets
+      if(g_sectionResults.stopLossDistance > 0 && g_sectionResults.atrValue > 0)
+         g_sectionResults.riskRewardRatio = (g_sectionResults.atrValue * 2.0) /
+                                             g_sectionResults.stopLossDistance;  // 2x ATR as TP1
+   }
+
+   void CheckRiskLimits()
+   {
+      g_sectionResults.marginOK = true;
+      g_sectionResults.drawdownOK = true;
+      g_sectionResults.dailyLossOK = true;
+
+      // Check drawdown limit
+      if(g_sectionResults.currentDrawdownPercent >= m_maxDrawdownPercent)
+      {
+         g_sectionResults.drawdownOK = false;
+         g_sectionResults.canTrade = false;
+         g_sectionResults.riskStatus = "BLOCKED";
+         g_sectionResults.blockReason = "Max drawdown exceeded: " +
+            DoubleToString(g_sectionResults.currentDrawdownPercent, 1) + "%";
+         return;
+      }
+      else if(g_sectionResults.currentDrawdownPercent >= m_maxDrawdownPercent * 0.8)
+      {
+         g_sectionResults.riskStatus = "WARNING";
+      }
+
+      // Check daily loss limit
+      if(g_sectionResults.dailyPnLPercent <= -m_maxDailyLossPercent)
+      {
+         g_sectionResults.dailyLossOK = false;
+         g_sectionResults.canTrade = false;
+         g_sectionResults.riskStatus = "BLOCKED";
+         g_sectionResults.blockReason = "Daily loss limit: " +
+            DoubleToString(g_sectionResults.dailyPnLPercent, 1) + "%";
+         return;
+      }
+      else if(g_sectionResults.dailyPnLPercent <= -m_maxDailyLossPercent * 0.8)
+      {
+         if(g_sectionResults.riskStatus != "BLOCKED")
+            g_sectionResults.riskStatus = "WARNING";
+      }
+
+      // Check margin level (warning at 200%, block at 150%)
+      if(g_sectionResults.marginLevel < 150 && g_sectionResults.marginLevel > 0)
+      {
+         g_sectionResults.marginOK = false;
+         g_sectionResults.canTrade = false;
+         g_sectionResults.riskStatus = "BLOCKED";
+         g_sectionResults.blockReason = "Low margin level: " +
+            DoubleToString(g_sectionResults.marginLevel, 0) + "%";
+      }
+      else if(g_sectionResults.marginLevel < 200 && g_sectionResults.marginLevel > 0)
+      {
+         if(g_sectionResults.riskStatus == "OK")
+            g_sectionResults.riskStatus = "WARNING";
+      }
+   }
+
+   void ValidateMargin()
+   {
+      if(!g_sectionResults.canTrade) return;
+
+      // Check if we have enough free margin for the calculated lot size
+      double marginRequired = 0;
+      if(!OrderCalcMargin(ORDER_TYPE_BUY, m_symbol, g_sectionResults.recommendedLotSize,
+                          SymbolInfoDouble(m_symbol, SYMBOL_ASK), marginRequired))
+      {
+         g_sectionResults.marginOK = false;
+         return;
+      }
+
+      if(marginRequired > g_sectionResults.accountFreeMargin * 0.8)
+      {
+         // Reduce lot size to fit available margin
+         double maxAffordableLots = (g_sectionResults.accountFreeMargin * 0.8) /
+                                     (marginRequired / g_sectionResults.recommendedLotSize);
+         double lotStep = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
+         maxAffordableLots = MathFloor(maxAffordableLots / lotStep) * lotStep;
+         g_sectionResults.recommendedLotSize = MathMax(m_minLots, maxAffordableLots);
+
+         if(g_sectionResults.recommendedLotSize < m_minLots)
+         {
+            g_sectionResults.marginOK = false;
+            g_sectionResults.canTrade = false;
+            g_sectionResults.riskStatus = "BLOCKED";
+            g_sectionResults.blockReason = "Insufficient margin";
+         }
+      }
+   }
+
+public:
+   // Getters
+   double GetRecommendedLots() { return g_sectionResults.recommendedLotSize; }
+   double GetRiskPercent() { return g_sectionResults.riskPercent; }
+   bool CanTrade() { return g_sectionResults.canTrade; }
+   string GetRiskStatus() { return g_sectionResults.riskStatus; }
+   double GetDrawdownPercent() { return g_sectionResults.currentDrawdownPercent; }
+   double GetDailyPnLPercent() { return g_sectionResults.dailyPnLPercent; }
+   double GetMarginLevel() { return g_sectionResults.marginLevel; }
+   bool IsMarginOK() { return g_sectionResults.marginOK; }
+   bool IsDrawdownOK() { return g_sectionResults.drawdownOK; }
+   bool IsDailyLossOK() { return g_sectionResults.dailyLossOK; }
+
+   // Recovery mode management
+   void EnterRecoveryMode() { g_sectionResults.inRecoveryMode = true; }
+   void ExitRecoveryMode() { g_sectionResults.inRecoveryMode = false; }
+   bool IsInRecoveryMode() { return g_sectionResults.inRecoveryMode; }
+};
+
+//+------------------------------------------------------------------+
 //| Section 11: Confluence Calculator                                 |
 //+------------------------------------------------------------------+
 class CConfluence
@@ -1560,6 +1978,9 @@ private:
    // Section 6: MACD/RSI Momentum
    CMACDRSIAnalysis  m_macdRsi;
 
+   // Section 12: Risk Management
+   CRiskManagement   m_riskMgmt;
+
    // Section 3-11: SMC Modules
    CMarketStructure  m_structure;
    CFairValueGap     m_fvg;
@@ -1589,6 +2010,9 @@ public:
       // Initialize Section 6: MACD/RSI Momentum (using HTF for trend confirmation)
       m_macdRsi.Init(symbol, htf, 12, 26, 9, 14, 70.0, 30.0);
 
+      // Initialize Section 12: Risk Management
+      m_riskMgmt.Init(symbol, htf, 1.0, 2.0, 0.5, 5.0, 20.0);
+
       // Initialize SMC modules
       m_structure.Init(symbol, htf);
       m_fvg.Init(symbol, ltf);
@@ -1606,7 +2030,7 @@ public:
       // Section 1: ATR Filter Analysis
       m_atrFilter.Analyze();
 
-      // Section 2: EMA Analysis
+      // Section 2: EMA Analysis (enhanced with trend strength)
       m_emaAnalysis.Analyze();
 
       // Run all SMC section analyses
@@ -1625,6 +2049,9 @@ public:
 
       // Calculate confluence score (includes momentum now)
       m_confluence.Calculate(); // Section 11
+
+      // Section 12: Risk Management (after confluence for risk adjustment)
+      m_riskMgmt.Analyze();
    }
 
    void AnalyzeHTFLTFAlignment()
@@ -1675,6 +2102,12 @@ public:
    string GetEMATrendBias() { return g_sectionResults.emaTrendBias; }
    bool IsEMABullish() { return g_sectionResults.emaBullish; }
    bool IsEMABearish() { return g_sectionResults.emaBearish; }
+   // Enhanced EMA Getters
+   double GetEMATrendStrength() { return g_sectionResults.emaTrendStrength; }
+   string GetEMATrendStrengthLabel() { return g_sectionResults.emaTrendStrengthLabel; }
+   bool IsEMAStackedBullish() { return g_sectionResults.emaStackedBullish; }
+   bool IsEMAStackedBearish() { return g_sectionResults.emaStackedBearish; }
+   int GetCrossoverBarsAgo() { return g_sectionResults.emaCrossoverBarsAgo; }
 
    // Section 6: MACD/RSI Getters
    double GetMACD() { return g_sectionResults.macdMain; }
@@ -1689,6 +2122,19 @@ public:
    bool IsMomentumAligned() { return g_sectionResults.momentumAligned; }
    bool HasBullishDivergence() { return g_sectionResults.macdDivergenceBullish; }
    bool HasBearishDivergence() { return g_sectionResults.macdDivergenceBearish; }
+
+   // Section 12: Risk Management Getters
+   double GetRecommendedLots() { return g_sectionResults.recommendedLotSize; }
+   double GetRiskPercent() { return g_sectionResults.riskPercent; }
+   bool CanTrade() { return g_sectionResults.canTrade; }
+   string GetRiskStatus() { return g_sectionResults.riskStatus; }
+   double GetDrawdownPercent() { return g_sectionResults.currentDrawdownPercent; }
+   double GetDailyPnLPercent() { return g_sectionResults.dailyPnLPercent; }
+   double GetMarginLevel() { return g_sectionResults.marginLevel; }
+   bool IsMarginOK() { return g_sectionResults.marginOK; }
+   bool IsDrawdownOK() { return g_sectionResults.drawdownOK; }
+   bool IsDailyLossOK() { return g_sectionResults.dailyLossOK; }
+   bool IsInRecoveryMode() { return g_sectionResults.inRecoveryMode; }
 };
 
 //+------------------------------------------------------------------+

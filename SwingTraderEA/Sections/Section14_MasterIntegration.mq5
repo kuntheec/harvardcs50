@@ -1125,7 +1125,7 @@ void PrintSMCDebug()
          " | Percentile: ", DoubleToString(g_sectionResults.atrPercentile, 1), "%",
          " | Squeeze: ", g_sectionResults.volatilitySqueeze ? "YES" : "NO");
 
-   // Section 2: EMA Analysis
+   // Section 2: EMA Analysis (Enhanced)
    Print("SEC 2 | EMA50: ", DoubleToString(g_sectionResults.emaFast, 2),
          " | EMA200: ", DoubleToString(g_sectionResults.emaSlow, 2),
          " | Bias: ", g_sectionResults.emaTrendBias);
@@ -1133,6 +1133,13 @@ void PrintSMCDebug()
          " | Bearish: ", g_sectionResults.emaBearish ? "YES" : "NO",
          " | GoldenX: ", g_sectionResults.emaCrossoverBullish ? "YES" : "NO",
          " | DeathX: ", g_sectionResults.emaCrossoverBearish ? "YES" : "NO");
+   Print("      | Strength: ", DoubleToString(g_sectionResults.emaTrendStrength, 0), "/100 (",
+         g_sectionResults.emaTrendStrengthLabel, ")",
+         " | Stacked: ", (g_sectionResults.emaStackedBullish ? "BULL" :
+                          g_sectionResults.emaStackedBearish ? "BEAR" : "NO"));
+   if(g_sectionResults.emaCrossoverBarsAgo >= 0)
+      Print("      | CrossoverBarsAgo: ", g_sectionResults.emaCrossoverBarsAgo,
+            " | PriceDistATR: ", DoubleToString(g_sectionResults.emaPriceDistanceATR, 2));
 
    // Section 3: Market Structure
    string trendStr = g_analysis.trend == STRUCTURE_BULLISH ? "BULLISH" :
@@ -1200,6 +1207,21 @@ void PrintSMCDebug()
          " | Strength: ", g_analysis.signalStrength == SIGNAL_STRONG ? "STRONG" :
                           g_analysis.signalStrength == SIGNAL_MODERATE ? "MODERATE" :
                           g_analysis.signalStrength == SIGNAL_WEAK ? "WEAK" : "NONE");
+
+   // Section 12: Risk Management
+   Print("SEC12 | Status: ", g_sectionResults.riskStatus,
+         " | CanTrade: ", g_sectionResults.canTrade ? "YES" : "NO",
+         " | Risk: ", DoubleToString(g_sectionResults.riskPercent, 2), "%");
+   Print("      | Lots: ", DoubleToString(g_sectionResults.recommendedLotSize, 2),
+         " | Balance: $", DoubleToString(g_sectionResults.accountBalance, 2),
+         " | Equity: $", DoubleToString(g_sectionResults.accountEquity, 2));
+   Print("      | DD: ", DoubleToString(g_sectionResults.currentDrawdownPercent, 2), "%",
+         " | DailyPnL: ", DoubleToString(g_sectionResults.dailyPnLPercent, 2), "%",
+         " | Margin: ", DoubleToString(g_sectionResults.marginLevel, 0), "%");
+   Print("      | Positions: ", g_sectionResults.openPositions,
+         " | Recovery: ", g_sectionResults.inRecoveryMode ? "YES" : "NO");
+   if(g_sectionResults.riskStatus == "BLOCKED")
+      Print("      | BLOCKED: ", g_sectionResults.blockReason);
 
    // Final Signal
    string dirStr = g_analysis.direction == DIR_BUY ? "BUY" :
