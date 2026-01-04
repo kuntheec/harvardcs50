@@ -1151,12 +1151,29 @@ void PrintSMCDebug()
          " | EQLTaken: ", g_analysis.eqlTaken ? "YES" : "NO",
          " | Level: ", DoubleToString(g_analysis.liquidityLevel, 2));
 
-   // Section 6: Session
+   // Session Analysis
    string sessionStr = g_analysis.currentSession == SESSION_LONDON ? "London" :
                        g_analysis.currentSession == SESSION_NEWYORK ? "NewYork" :
                        g_analysis.currentSession == SESSION_OVERLAP ? "Overlap" :
                        g_analysis.currentSession == SESSION_ASIA ? "Asia" : "OffHours";
-   Print("SEC 6 | Session: ", sessionStr, " | Active: ", g_analysis.sessionActive ? "YES" : "NO");
+   Print("SESSN | Session: ", sessionStr, " | Active: ", g_analysis.sessionActive ? "YES" : "NO",
+         " | Killzone: ", g_sectionResults.inKillzone ? "YES" : "NO");
+
+   // Section 6: MACD/RSI Momentum
+   Print("SEC 6 | MACD: ", DoubleToString(g_sectionResults.macdMain, 5),
+         " | Signal: ", DoubleToString(g_sectionResults.macdSignal, 5),
+         " | Hist: ", DoubleToString(g_sectionResults.macdHistogram, 5));
+   Print("      | MACDBull: ", g_sectionResults.macdBullish ? "YES" : "NO",
+         " | MACDBear: ", g_sectionResults.macdBearish ? "YES" : "NO",
+         " | CrossBull: ", g_sectionResults.macdCrossoverBullish ? "YES" : "NO",
+         " | CrossBear: ", g_sectionResults.macdCrossoverBearish ? "YES" : "NO");
+   Print("      | RSI: ", DoubleToString(g_sectionResults.rsiValue, 1),
+         " | OB: ", g_sectionResults.rsiOverbought ? "YES" : "NO",
+         " | OS: ", g_sectionResults.rsiOversold ? "YES" : "NO",
+         " | Bias: ", g_sectionResults.momentumBias,
+         " | Aligned: ", g_sectionResults.momentumAligned ? "YES" : "NO");
+   if(g_sectionResults.macdDivergenceBullish || g_sectionResults.macdDivergenceBearish)
+      Print("      | Divergence: ", g_sectionResults.macdDivergenceBullish ? "BULLISH" : "BEARISH");
 
    // Section 7: FVG
    Print("SEC 7 | Bullish: ", g_sectionResults.bullishFVGCount,

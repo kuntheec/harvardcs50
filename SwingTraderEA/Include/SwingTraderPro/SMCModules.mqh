@@ -154,6 +154,23 @@ struct SectionResults
    bool              emaCrossoverBearish;      // Recent death cross
    string            emaTrendBias;             // "BULLISH", "BEARISH", "NEUTRAL"
 
+   // Section 6: MACD/RSI Momentum Analysis
+   double            macdMain;                 // MACD main line
+   double            macdSignal;               // MACD signal line
+   double            macdHistogram;            // MACD histogram (main - signal)
+   bool              macdBullish;              // MACD above signal line
+   bool              macdBearish;              // MACD below signal line
+   bool              macdCrossoverBullish;     // Recent bullish crossover
+   bool              macdCrossoverBearish;     // Recent bearish crossover
+   bool              macdDivergenceBullish;    // Bullish divergence detected
+   bool              macdDivergenceBearish;    // Bearish divergence detected
+   double            rsiValue;                 // RSI value (0-100)
+   bool              rsiOverbought;            // RSI > 70
+   bool              rsiOversold;              // RSI < 30
+   bool              rsiNeutral;               // RSI 30-70
+   string            momentumBias;             // "BULLISH", "BEARISH", "NEUTRAL"
+   bool              momentumAligned;          // Momentum aligns with trend
+
    // Final Signal
    ENUM_SIGNAL_DIRECTION signalDirection;
    double            entryPrice;
@@ -1168,6 +1185,273 @@ public:
 };
 
 //+------------------------------------------------------------------+
+//| Section 6: MACD/RSI Momentum Analysis                             |
+//+------------------------------------------------------------------+
+class CMACDRSIAnalysis
+{
+private:
+   string            m_symbol;
+   ENUM_TIMEFRAMES   m_timeframe;
+
+   // MACD parameters
+   int               m_macdFastPeriod;
+   int               m_macdSlowPeriod;
+   int               m_macdSignalPeriod;
+   int               m_macdHandle;
+   double            m_macdMainBuffer[];
+   double            m_macdSignalBuffer[];
+
+   // RSI parameters
+   int               m_rsiPeriod;
+   int               m_rsiHandle;
+   double            m_rsiBuffer[];
+
+   // Analysis settings
+   int               m_crossoverLookback;
+   int               m_divergenceLookback;
+   double            m_rsiOverboughtLevel;
+   double            m_rsiOversoldLevel;
+
+public:
+   void Init(string symbol, ENUM_TIMEFRAMES tf,
+             int macdFast = 12, int macdSlow = 26, int macdSignal = 9,
+             int rsiPeriod = 14, double rsiOB = 70.0, double rsiOS = 30.0)
+   {
+      m_symbol = symbol;
+      m_timeframe = tf;
+
+      // MACD settings
+      m_macdFastPeriod = macdFast;
+      m_macdSlowPeriod = macdSlow;
+      m_macdSignalPeriod = macdSignal;
+
+      // RSI settings
+      m_rsiPeriod = rsiPeriod;
+      m_rsiOverboughtLevel = rsiOB;
+      m_rsiOversoldLevel = rsiOS;
+
+      // Lookback periods
+      m_crossoverLookback = 5;
+      m_divergenceLookback = 20;
+
+      // Create indicator handles
+      m_macdHandle = iMACD(symbol, tf, m_macdFastPeriod, m_macdSlowPeriod, m_macdSignalPeriod, PRICE_CLOSE);
+      m_rsiHandle = iRSI(symbol, tf, m_rsiPeriod, PRICE_CLOSE);
+
+      // Set arrays as series
+      ArraySetAsSeries(m_macdMainBuffer, true);
+      ArraySetAsSeries(m_macdSignalBuffer, true);
+      ArraySetAsSeries(m_rsiBuffer, true);
+   }
+
+   void Analyze()
+   {
+      // Reset all values
+      g_sectionResults.macdMain = 0;
+      g_sectionResults.macdSignal = 0;
+      g_sectionResults.macdHistogram = 0;
+      g_sectionResults.macdBullish = false;
+      g_sectionResults.macdBearish = false;
+      g_sectionResults.macdCrossoverBullish = false;
+      g_sectionResults.macdCrossoverBearish = false;
+      g_sectionResults.macdDivergenceBullish = false;
+      g_sectionResults.macdDivergenceBearish = false;
+      g_sectionResults.rsiValue = 50;
+      g_sectionResults.rsiOverbought = false;
+      g_sectionResults.rsiOversold = false;
+      g_sectionResults.rsiNeutral = true;
+      g_sectionResults.momentumBias = "NEUTRAL";
+      g_sectionResults.momentumAligned = false;
+
+      // Validate handles
+      if(m_macdHandle == INVALID_HANDLE || m_rsiHandle == INVALID_HANDLE)
+      {
+         Print("⚠ MACD/RSI: Invalid indicator handles");
+         return;
+      }
+
+      int bars = m_divergenceLookback + 5;
+
+      // Copy MACD buffers (with error handling)
+      int macdMainCopied = CopyBuffer(m_macdHandle, 0, 0, bars, m_macdMainBuffer);
+      int macdSignalCopied = CopyBuffer(m_macdHandle, 1, 0, bars, m_macdSignalBuffer);
+      if(macdMainCopied < bars || macdSignalCopied < bars)
+      {
+         Print("⚠ MACD: Failed to copy buffers, got ", macdMainCopied, "/", macdSignalCopied);
+         return;
+      }
+
+      // Copy RSI buffer (with error handling)
+      int rsiCopied = CopyBuffer(m_rsiHandle, 0, 0, bars, m_rsiBuffer);
+      if(rsiCopied < bars)
+      {
+         Print("⚠ RSI: Failed to copy buffer, got ", rsiCopied);
+         return;
+      }
+
+      // === MACD Analysis ===
+      g_sectionResults.macdMain = m_macdMainBuffer[0];
+      g_sectionResults.macdSignal = m_macdSignalBuffer[0];
+      g_sectionResults.macdHistogram = m_macdMainBuffer[0] - m_macdSignalBuffer[0];
+
+      // MACD position relative to signal
+      g_sectionResults.macdBullish = (m_macdMainBuffer[0] > m_macdSignalBuffer[0]);
+      g_sectionResults.macdBearish = (m_macdMainBuffer[0] < m_macdSignalBuffer[0]);
+
+      // Check for recent MACD crossovers
+      for(int i = 0; i < m_crossoverLookback; i++)
+      {
+         // Bullish crossover: MACD crosses above Signal
+         if(m_macdMainBuffer[i] > m_macdSignalBuffer[i] &&
+            m_macdMainBuffer[i+1] <= m_macdSignalBuffer[i+1])
+         {
+            g_sectionResults.macdCrossoverBullish = true;
+            break;
+         }
+         // Bearish crossover: MACD crosses below Signal
+         if(m_macdMainBuffer[i] < m_macdSignalBuffer[i] &&
+            m_macdMainBuffer[i+1] >= m_macdSignalBuffer[i+1])
+         {
+            g_sectionResults.macdCrossoverBearish = true;
+            break;
+         }
+      }
+
+      // === RSI Analysis ===
+      g_sectionResults.rsiValue = m_rsiBuffer[0];
+      g_sectionResults.rsiOverbought = (m_rsiBuffer[0] > m_rsiOverboughtLevel);
+      g_sectionResults.rsiOversold = (m_rsiBuffer[0] < m_rsiOversoldLevel);
+      g_sectionResults.rsiNeutral = (!g_sectionResults.rsiOverbought && !g_sectionResults.rsiOversold);
+
+      // === Divergence Detection ===
+      DetectDivergence();
+
+      // === Overall Momentum Bias ===
+      DetermineMomentumBias();
+   }
+
+private:
+   void DetectDivergence()
+   {
+      // Simple divergence detection: compare price highs/lows with MACD highs/lows
+      double currentPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
+
+      // Get recent swing highs/lows from price
+      double priceHigh1 = 0, priceHigh2 = 0;
+      double priceLow1 = DBL_MAX, priceLow2 = DBL_MAX;
+      double macdHigh1 = -DBL_MAX, macdHigh2 = -DBL_MAX;
+      double macdLow1 = DBL_MAX, macdLow2 = DBL_MAX;
+
+      int swingCount = 0;
+      for(int i = 2; i < m_divergenceLookback - 2 && swingCount < 4; i++)
+      {
+         double high = iHigh(m_symbol, m_timeframe, i);
+         double low = iLow(m_symbol, m_timeframe, i);
+         double high1 = iHigh(m_symbol, m_timeframe, i-1);
+         double high2 = iHigh(m_symbol, m_timeframe, i+1);
+         double low1 = iLow(m_symbol, m_timeframe, i-1);
+         double low2 = iLow(m_symbol, m_timeframe, i+1);
+
+         // Swing high
+         if(high > high1 && high > high2)
+         {
+            if(priceHigh1 == 0)
+            {
+               priceHigh1 = high;
+               macdHigh1 = m_macdMainBuffer[i];
+            }
+            else if(priceHigh2 == 0)
+            {
+               priceHigh2 = high;
+               macdHigh2 = m_macdMainBuffer[i];
+            }
+            swingCount++;
+         }
+
+         // Swing low
+         if(low < low1 && low < low2)
+         {
+            if(priceLow1 == DBL_MAX)
+            {
+               priceLow1 = low;
+               macdLow1 = m_macdMainBuffer[i];
+            }
+            else if(priceLow2 == DBL_MAX)
+            {
+               priceLow2 = low;
+               macdLow2 = m_macdMainBuffer[i];
+            }
+            swingCount++;
+         }
+      }
+
+      // Bullish divergence: Price makes lower low, MACD makes higher low
+      if(priceLow1 < priceLow2 && macdLow1 > macdLow2 && priceLow2 != DBL_MAX)
+         g_sectionResults.macdDivergenceBullish = true;
+
+      // Bearish divergence: Price makes higher high, MACD makes lower high
+      if(priceHigh1 > priceHigh2 && macdHigh1 < macdHigh2 && priceHigh2 != 0)
+         g_sectionResults.macdDivergenceBearish = true;
+   }
+
+   void DetermineMomentumBias()
+   {
+      int bullishScore = 0;
+      int bearishScore = 0;
+
+      // MACD contribution
+      if(g_sectionResults.macdBullish) bullishScore += 2;
+      if(g_sectionResults.macdBearish) bearishScore += 2;
+      if(g_sectionResults.macdCrossoverBullish) bullishScore += 1;
+      if(g_sectionResults.macdCrossoverBearish) bearishScore += 1;
+      if(g_sectionResults.macdHistogram > 0) bullishScore += 1;
+      if(g_sectionResults.macdHistogram < 0) bearishScore += 1;
+
+      // RSI contribution
+      if(g_sectionResults.rsiValue > 50) bullishScore += 1;
+      if(g_sectionResults.rsiValue < 50) bearishScore += 1;
+      if(g_sectionResults.rsiOversold) bullishScore += 1;  // Oversold = potential bullish reversal
+      if(g_sectionResults.rsiOverbought) bearishScore += 1;  // Overbought = potential bearish reversal
+
+      // Divergence contribution (stronger signal)
+      if(g_sectionResults.macdDivergenceBullish) bullishScore += 2;
+      if(g_sectionResults.macdDivergenceBearish) bearishScore += 2;
+
+      // Determine overall bias
+      if(bullishScore > bearishScore + 2)
+         g_sectionResults.momentumBias = "BULLISH";
+      else if(bearishScore > bullishScore + 2)
+         g_sectionResults.momentumBias = "BEARISH";
+      else
+         g_sectionResults.momentumBias = "NEUTRAL";
+
+      // Check if momentum aligns with market trend
+      g_sectionResults.momentumAligned = false;
+      if(g_sectionResults.marketTrend == TREND_BULLISH &&
+         g_sectionResults.momentumBias == "BULLISH")
+         g_sectionResults.momentumAligned = true;
+      else if(g_sectionResults.marketTrend == TREND_BEARISH &&
+              g_sectionResults.momentumBias == "BEARISH")
+         g_sectionResults.momentumAligned = true;
+   }
+
+public:
+   // Getters
+   double GetMACD() { return g_sectionResults.macdMain; }
+   double GetMACDSignal() { return g_sectionResults.macdSignal; }
+   double GetMACDHistogram() { return g_sectionResults.macdHistogram; }
+   double GetRSI() { return g_sectionResults.rsiValue; }
+   bool IsMACDBullish() { return g_sectionResults.macdBullish; }
+   bool IsMACDBearish() { return g_sectionResults.macdBearish; }
+   bool IsRSIOverbought() { return g_sectionResults.rsiOverbought; }
+   bool IsRSIOversold() { return g_sectionResults.rsiOversold; }
+   string GetMomentumBias() { return g_sectionResults.momentumBias; }
+   bool IsMomentumAligned() { return g_sectionResults.momentumAligned; }
+   bool HasBullishDivergence() { return g_sectionResults.macdDivergenceBullish; }
+   bool HasBearishDivergence() { return g_sectionResults.macdDivergenceBearish; }
+};
+
+//+------------------------------------------------------------------+
 //| Section 11: Confluence Calculator                                 |
 //+------------------------------------------------------------------+
 class CConfluence
@@ -1232,6 +1516,24 @@ public:
          g_sectionResults.bearishFactors++;
       }
 
+      // MACD/RSI Momentum Alignment (+1) - Section 6 integration
+      // Add point if momentum confirms the market trend direction
+      if(g_sectionResults.momentumAligned)
+      {
+         score += 1;
+         if(g_sectionResults.marketTrend == TREND_BULLISH)
+            g_sectionResults.bullishFactors++;
+         else if(g_sectionResults.marketTrend == TREND_BEARISH)
+            g_sectionResults.bearishFactors++;
+      }
+
+      // Divergence bonus (+1) - Strong reversal signal
+      if((g_sectionResults.macdDivergenceBullish && g_sectionResults.marketTrend == TREND_BULLISH) ||
+         (g_sectionResults.macdDivergenceBearish && g_sectionResults.marketTrend == TREND_BEARISH))
+      {
+         score += 1;
+      }
+
       g_sectionResults.confluenceScore = MathMin(score, 10);
 
       // Signal strength
@@ -1254,6 +1556,9 @@ private:
    // Section 1 & 2: ATR and EMA
    CATRFilter        m_atrFilter;
    CEMAAnalysis      m_emaAnalysis;
+
+   // Section 6: MACD/RSI Momentum
+   CMACDRSIAnalysis  m_macdRsi;
 
    // Section 3-11: SMC Modules
    CMarketStructure  m_structure;
@@ -1281,6 +1586,9 @@ public:
       // Initialize Section 2: EMA Analysis (using HTF timeframe)
       m_emaAnalysis.Init(symbol, htf, 50, 200, 5, 10);
 
+      // Initialize Section 6: MACD/RSI Momentum (using HTF for trend confirmation)
+      m_macdRsi.Init(symbol, htf, 12, 26, 9, 14, 70.0, 30.0);
+
       // Initialize SMC modules
       m_structure.Init(symbol, htf);
       m_fvg.Init(symbol, ltf);
@@ -1302,17 +1610,20 @@ public:
       m_emaAnalysis.Analyze();
 
       // Run all SMC section analyses
-      m_structure.Analyze();    // Section 3
+      m_structure.Analyze();    // Section 3 - Must run before MACD/RSI for trend data
       m_fvg.Analyze();          // Section 7
       m_orderBlock.Analyze();   // Section 8
       m_liquidity.Analyze();    // Section 5
       m_fibonacci.Analyze();    // Section 9
-      m_session.Analyze();      // Section 6
+      m_session.Analyze();      // Session Analysis
+
+      // Section 6: MACD/RSI Momentum (after structure for trend alignment check)
+      m_macdRsi.Analyze();
 
       // Calculate HTF/LTF alignment (now uses EMA data)
       AnalyzeHTFLTFAlignment();
 
-      // Calculate confluence score
+      // Calculate confluence score (includes momentum now)
       m_confluence.Calculate(); // Section 11
    }
 
@@ -1364,6 +1675,20 @@ public:
    string GetEMATrendBias() { return g_sectionResults.emaTrendBias; }
    bool IsEMABullish() { return g_sectionResults.emaBullish; }
    bool IsEMABearish() { return g_sectionResults.emaBearish; }
+
+   // Section 6: MACD/RSI Getters
+   double GetMACD() { return g_sectionResults.macdMain; }
+   double GetMACDSignal() { return g_sectionResults.macdSignal; }
+   double GetMACDHistogram() { return g_sectionResults.macdHistogram; }
+   double GetRSI() { return g_sectionResults.rsiValue; }
+   bool IsMACDBullish() { return g_sectionResults.macdBullish; }
+   bool IsMACDBearish() { return g_sectionResults.macdBearish; }
+   bool IsRSIOverbought() { return g_sectionResults.rsiOverbought; }
+   bool IsRSIOversold() { return g_sectionResults.rsiOversold; }
+   string GetMomentumBias() { return g_sectionResults.momentumBias; }
+   bool IsMomentumAligned() { return g_sectionResults.momentumAligned; }
+   bool HasBullishDivergence() { return g_sectionResults.macdDivergenceBullish; }
+   bool HasBearishDivergence() { return g_sectionResults.macdDivergenceBearish; }
 };
 
 //+------------------------------------------------------------------+
