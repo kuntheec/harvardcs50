@@ -105,6 +105,15 @@ struct SectionResults
    double            currentFibLevel;
    double            goldenPocket618;
    double            goldenPocket65;
+   // Enhanced Fibonacci - Pullback Detection
+   double            fib382Level;              // 38.2% retracement level
+   double            fib50Level;               // 50% retracement level
+   double            fib618Level;              // 61.8% retracement level
+   bool              inPullbackZone;           // Price in 38.2%-61.8% zone
+   bool              pullbackToBuy;            // Bullish pullback (buy opportunity)
+   bool              pullbackToSell;           // Bearish pullback (sell opportunity)
+   double            pullbackDepth;            // Current pullback depth (0-1)
+   string            pullbackQuality;          // "SHALLOW", "OPTIMAL", "DEEP"
 
    // Section 10: Killzones
    bool              htfTrendBullish;
@@ -113,13 +122,21 @@ struct SectionResults
    bool              htfLtfAligned;
    double            htfPOI;
 
-   // Section 11: Confluence
+   // Section 11: Confluence & Entry Logic
    int               confluenceScore;
    int               bullishFactors;
    int               bearishFactors;
    bool              signalStrong;
    bool              signalModerate;
    bool              signalWeak;
+   // Enhanced Entry Logic fields
+   bool              entryConditionsMet;       // All entry conditions satisfied
+   bool              momentumConfirmed;        // MACD/RSI confirms direction
+   bool              emaConfirmed;             // EMA confirms direction
+   bool              structureConfirmed;       // BOS/CHoCH confirms direction
+   bool              zoneConfirmed;            // In valid S/D or OB zone
+   string            entryType;                // "PULLBACK", "BREAKOUT", "REVERSAL"
+   int               entryQualityScore;        // 0-100 entry quality
 
    // Section 12: Risk Management
    double            recommendedLotSize;
@@ -820,7 +837,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| Section 9: Fibonacci/OTE Analysis                                 |
+//| Section 9: Fibonacci/OTE Analysis with Pullback Detection         |
 //+------------------------------------------------------------------+
 class CFibonacci
 {
@@ -837,49 +854,108 @@ public:
 
    void Analyze()
    {
+      // Reset all values
       g_sectionResults.inOTEZone = false;
+      g_sectionResults.inPullbackZone = false;
+      g_sectionResults.pullbackToBuy = false;
+      g_sectionResults.pullbackToSell = false;
+      g_sectionResults.pullbackDepth = 0;
+      g_sectionResults.pullbackQuality = "NONE";
 
       double swingHigh = g_sectionResults.lastSwingHigh;
       double swingLow = g_sectionResults.lastSwingLow;
 
       if(swingHigh == 0 || swingLow == 0) return;
+      if(swingHigh <= swingLow) return;
 
       double range = swingHigh - swingLow;
       double currentPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
 
-      // OTE Zone: 61.8% - 78.6% retracement
+      // Calculate all Fibonacci levels
       if(g_sectionResults.marketTrend == TREND_BULLISH)
       {
-         // Uptrend: OTE is retracement from high
-         g_sectionResults.goldenPocket618 = swingHigh - (range * 0.618);
+         // Uptrend: Fib retracement from swing high to swing low
+         // Looking for pullback DOWN to buy
+         g_sectionResults.fib382Level = swingHigh - (range * 0.382);
+         g_sectionResults.fib50Level = swingHigh - (range * 0.50);
+         g_sectionResults.fib618Level = swingHigh - (range * 0.618);
+         g_sectionResults.goldenPocket618 = g_sectionResults.fib618Level;
          g_sectionResults.goldenPocket65 = swingHigh - (range * 0.65);
          g_sectionResults.oteHigh = swingHigh - (range * 0.618);
          g_sectionResults.oteLow = swingHigh - (range * 0.786);
 
+         // Calculate pullback depth (0 = at high, 1 = at low)
+         g_sectionResults.pullbackDepth = (swingHigh - currentPrice) / range;
+
+         // Check if price is in OTE zone (61.8% - 78.6%)
          if(currentPrice <= g_sectionResults.oteHigh && currentPrice >= g_sectionResults.oteLow)
          {
             g_sectionResults.inOTEZone = true;
-            g_sectionResults.currentFibLevel = (swingHigh - currentPrice) / range;
+            g_sectionResults.currentFibLevel = g_sectionResults.pullbackDepth;
+         }
+
+         // Check if in pullback zone (38.2% - 61.8%) - BUY opportunity
+         if(currentPrice <= g_sectionResults.fib382Level && currentPrice >= g_sectionResults.fib618Level)
+         {
+            g_sectionResults.inPullbackZone = true;
+            g_sectionResults.pullbackToBuy = true;
+
+            // Rate pullback quality
+            if(g_sectionResults.pullbackDepth >= 0.382 && g_sectionResults.pullbackDepth < 0.50)
+               g_sectionResults.pullbackQuality = "SHALLOW";
+            else if(g_sectionResults.pullbackDepth >= 0.50 && g_sectionResults.pullbackDepth <= 0.618)
+               g_sectionResults.pullbackQuality = "OPTIMAL";
+            else if(g_sectionResults.pullbackDepth > 0.618)
+               g_sectionResults.pullbackQuality = "DEEP";
          }
       }
       else if(g_sectionResults.marketTrend == TREND_BEARISH)
       {
-         // Downtrend: OTE is retracement from low
-         g_sectionResults.goldenPocket618 = swingLow + (range * 0.618);
+         // Downtrend: Fib retracement from swing low to swing high
+         // Looking for pullback UP to sell
+         g_sectionResults.fib382Level = swingLow + (range * 0.382);
+         g_sectionResults.fib50Level = swingLow + (range * 0.50);
+         g_sectionResults.fib618Level = swingLow + (range * 0.618);
+         g_sectionResults.goldenPocket618 = g_sectionResults.fib618Level;
          g_sectionResults.goldenPocket65 = swingLow + (range * 0.65);
          g_sectionResults.oteHigh = swingLow + (range * 0.786);
          g_sectionResults.oteLow = swingLow + (range * 0.618);
 
+         // Calculate pullback depth (0 = at low, 1 = at high)
+         g_sectionResults.pullbackDepth = (currentPrice - swingLow) / range;
+
+         // Check if price is in OTE zone (61.8% - 78.6%)
          if(currentPrice >= g_sectionResults.oteLow && currentPrice <= g_sectionResults.oteHigh)
          {
             g_sectionResults.inOTEZone = true;
-            g_sectionResults.currentFibLevel = (currentPrice - swingLow) / range;
+            g_sectionResults.currentFibLevel = g_sectionResults.pullbackDepth;
+         }
+
+         // Check if in pullback zone (38.2% - 61.8%) - SELL opportunity
+         if(currentPrice >= g_sectionResults.fib382Level && currentPrice <= g_sectionResults.fib618Level)
+         {
+            g_sectionResults.inPullbackZone = true;
+            g_sectionResults.pullbackToSell = true;
+
+            // Rate pullback quality
+            if(g_sectionResults.pullbackDepth >= 0.382 && g_sectionResults.pullbackDepth < 0.50)
+               g_sectionResults.pullbackQuality = "SHALLOW";
+            else if(g_sectionResults.pullbackDepth >= 0.50 && g_sectionResults.pullbackDepth <= 0.618)
+               g_sectionResults.pullbackQuality = "OPTIMAL";
+            else if(g_sectionResults.pullbackDepth > 0.618)
+               g_sectionResults.pullbackQuality = "DEEP";
          }
       }
    }
 
+   // Getters
    bool IsInOTE() { return g_sectionResults.inOTEZone; }
+   bool IsInPullbackZone() { return g_sectionResults.inPullbackZone; }
+   bool IsPullbackToBuy() { return g_sectionResults.pullbackToBuy; }
+   bool IsPullbackToSell() { return g_sectionResults.pullbackToSell; }
    double GetFibLevel() { return g_sectionResults.currentFibLevel; }
+   double GetPullbackDepth() { return g_sectionResults.pullbackDepth; }
+   string GetPullbackQuality() { return g_sectionResults.pullbackQuality; }
 };
 
 //+------------------------------------------------------------------+
@@ -1966,6 +2042,258 @@ public:
 };
 
 //+------------------------------------------------------------------+
+//| Section 11: Entry Logic - Full Section Sync                       |
+//+------------------------------------------------------------------+
+class CEntryLogic
+{
+public:
+   void Analyze()
+   {
+      // Reset entry logic flags
+      g_sectionResults.entryConditionsMet = false;
+      g_sectionResults.momentumConfirmed = false;
+      g_sectionResults.emaConfirmed = false;
+      g_sectionResults.structureConfirmed = false;
+      g_sectionResults.zoneConfirmed = false;
+      g_sectionResults.entryType = "NONE";
+      g_sectionResults.entryQualityScore = 0;
+
+      // === Section 3: Structure Confirmation ===
+      g_sectionResults.structureConfirmed = g_sectionResults.bosConfirmed ||
+                                             g_sectionResults.chochDetected;
+
+      // === Section 2: EMA Confirmation ===
+      // For bullish: price above EMAs, EMAs stacked bullish
+      // For bearish: price below EMAs, EMAs stacked bearish
+      if(g_sectionResults.marketTrend == TREND_BULLISH)
+      {
+         g_sectionResults.emaConfirmed = g_sectionResults.emaBullish ||
+                                          g_sectionResults.emaStackedBullish;
+      }
+      else if(g_sectionResults.marketTrend == TREND_BEARISH)
+      {
+         g_sectionResults.emaConfirmed = g_sectionResults.emaBearish ||
+                                          g_sectionResults.emaStackedBearish;
+      }
+
+      // === Section 6: Momentum Confirmation (MACD/RSI) ===
+      g_sectionResults.momentumConfirmed = g_sectionResults.momentumAligned;
+
+      // Extra confirmation from MACD crossovers or divergence
+      if(g_sectionResults.marketTrend == TREND_BULLISH)
+      {
+         if(g_sectionResults.macdCrossoverBullish || g_sectionResults.macdDivergenceBullish)
+            g_sectionResults.momentumConfirmed = true;
+      }
+      else if(g_sectionResults.marketTrend == TREND_BEARISH)
+      {
+         if(g_sectionResults.macdCrossoverBearish || g_sectionResults.macdDivergenceBearish)
+            g_sectionResults.momentumConfirmed = true;
+      }
+
+      // === Section 4 & 8: Zone Confirmation (S/D or OB) ===
+      if(g_sectionResults.marketTrend == TREND_BULLISH)
+      {
+         g_sectionResults.zoneConfirmed = g_sectionResults.inDemandZone ||
+                                           g_sectionResults.bullishOBPresent ||
+                                           g_sectionResults.priceInOB;
+      }
+      else if(g_sectionResults.marketTrend == TREND_BEARISH)
+      {
+         g_sectionResults.zoneConfirmed = g_sectionResults.inSupplyZone ||
+                                           g_sectionResults.bearishOBPresent ||
+                                           g_sectionResults.priceInOB;
+      }
+
+      // === Determine Entry Type ===
+      DetermineEntryType();
+
+      // === Calculate Entry Quality Score ===
+      CalculateEntryQuality();
+
+      // === Check All Conditions Met ===
+      CheckEntryConditions();
+   }
+
+private:
+   void DetermineEntryType()
+   {
+      // PULLBACK: In trend, price retraced to Fib level (38.2%-61.8%)
+      if(g_sectionResults.inPullbackZone)
+      {
+         if((g_sectionResults.marketTrend == TREND_BULLISH && g_sectionResults.pullbackToBuy) ||
+            (g_sectionResults.marketTrend == TREND_BEARISH && g_sectionResults.pullbackToSell))
+         {
+            g_sectionResults.entryType = "PULLBACK";
+            return;
+         }
+      }
+
+      // BREAKOUT: BOS confirmed with momentum
+      if(g_sectionResults.bosConfirmed && g_sectionResults.momentumConfirmed)
+      {
+         // Check for strong momentum (histogram expanding)
+         if(MathAbs(g_sectionResults.macdHistogram) > 0)
+         {
+            g_sectionResults.entryType = "BREAKOUT";
+            return;
+         }
+      }
+
+      // REVERSAL: CHoCH or divergence detected
+      if(g_sectionResults.chochDetected)
+      {
+         g_sectionResults.entryType = "REVERSAL";
+         return;
+      }
+
+      // Divergence-based reversal
+      if((g_sectionResults.macdDivergenceBullish && g_sectionResults.inDemandZone) ||
+         (g_sectionResults.macdDivergenceBearish && g_sectionResults.inSupplyZone))
+      {
+         g_sectionResults.entryType = "REVERSAL";
+         return;
+      }
+
+      // No clear entry type
+      g_sectionResults.entryType = "NONE";
+   }
+
+   void CalculateEntryQuality()
+   {
+      int quality = 0;
+
+      // Structure confirmation (+20)
+      if(g_sectionResults.structureConfirmed)
+         quality += 20;
+
+      // Momentum confirmation (+15)
+      if(g_sectionResults.momentumConfirmed)
+         quality += 15;
+
+      // EMA confirmation (+10)
+      if(g_sectionResults.emaConfirmed)
+         quality += 10;
+
+      // EMA trend strength bonus
+      if(g_sectionResults.emaTrendStrength >= 70)
+         quality += 10;
+      else if(g_sectionResults.emaTrendStrength >= 40)
+         quality += 5;
+
+      // Zone confirmation (+15)
+      if(g_sectionResults.zoneConfirmed)
+         quality += 15;
+
+      // HTF/LTF alignment (+10)
+      if(g_sectionResults.htfLtfAligned)
+         quality += 10;
+
+      // Session active (+5)
+      if(g_sectionResults.sessionActive)
+         quality += 5;
+
+      // Pullback quality bonus
+      if(g_sectionResults.entryType == "PULLBACK")
+      {
+         if(g_sectionResults.pullbackQuality == "OPTIMAL")
+            quality += 15;
+         else if(g_sectionResults.pullbackQuality == "SHALLOW")
+            quality += 10;
+         else if(g_sectionResults.pullbackQuality == "DEEP")
+            quality += 5;
+      }
+
+      // OTE zone bonus (+10)
+      if(g_sectionResults.inOTEZone)
+         quality += 10;
+
+      // FVG alignment (+5)
+      if((g_sectionResults.marketTrend == TREND_BULLISH && g_sectionResults.bullishFVGPresent) ||
+         (g_sectionResults.marketTrend == TREND_BEARISH && g_sectionResults.bearishFVGPresent))
+         quality += 5;
+
+      // Liquidity swept (+5)
+      if(g_sectionResults.liquiditySwept)
+         quality += 5;
+
+      // Fresh Order Block bonus (+5)
+      if(g_sectionResults.obFresh)
+         quality += 5;
+
+      // MACD/RSI divergence bonus (+10 for reversal confirmation)
+      if((g_sectionResults.marketTrend == TREND_BULLISH && g_sectionResults.macdDivergenceBullish) ||
+         (g_sectionResults.marketTrend == TREND_BEARISH && g_sectionResults.macdDivergenceBearish))
+         quality += 10;
+
+      // RSI extreme bonus for reversals
+      if(g_sectionResults.entryType == "REVERSAL")
+      {
+         if((g_sectionResults.marketTrend == TREND_BULLISH && g_sectionResults.rsiOversold) ||
+            (g_sectionResults.marketTrend == TREND_BEARISH && g_sectionResults.rsiOverbought))
+            quality += 5;
+      }
+
+      // Cap at 100
+      g_sectionResults.entryQualityScore = MathMin(quality, 100);
+   }
+
+   void CheckEntryConditions()
+   {
+      // Minimum requirements for entry
+      bool hasValidEntryType = (g_sectionResults.entryType != "NONE");
+      bool hasMinConfluence = (g_sectionResults.confluenceScore >= 4);
+      bool hasDirectionalBias = (g_sectionResults.marketTrend == TREND_BULLISH ||
+                                  g_sectionResults.marketTrend == TREND_BEARISH);
+
+      // Different requirements based on entry type
+      if(g_sectionResults.entryType == "PULLBACK")
+      {
+         // Pullback needs: trend + pullback zone + at least one confirmation
+         g_sectionResults.entryConditionsMet = hasDirectionalBias &&
+                                                g_sectionResults.inPullbackZone &&
+                                                (g_sectionResults.momentumConfirmed ||
+                                                 g_sectionResults.emaConfirmed ||
+                                                 g_sectionResults.zoneConfirmed);
+      }
+      else if(g_sectionResults.entryType == "BREAKOUT")
+      {
+         // Breakout needs: BOS + momentum + decent confluence
+         g_sectionResults.entryConditionsMet = g_sectionResults.bosConfirmed &&
+                                                g_sectionResults.momentumConfirmed &&
+                                                hasMinConfluence;
+      }
+      else if(g_sectionResults.entryType == "REVERSAL")
+      {
+         // Reversal needs: CHoCH or divergence + zone + higher confluence threshold
+         g_sectionResults.entryConditionsMet = (g_sectionResults.chochDetected ||
+                                                 g_sectionResults.macdDivergenceBullish ||
+                                                 g_sectionResults.macdDivergenceBearish) &&
+                                                g_sectionResults.zoneConfirmed &&
+                                                (g_sectionResults.confluenceScore >= 5);
+      }
+      else
+      {
+         g_sectionResults.entryConditionsMet = false;
+      }
+
+      // Additional filter: Risk management must allow trading
+      if(!g_sectionResults.canTrade)
+         g_sectionResults.entryConditionsMet = false;
+   }
+
+public:
+   // Getters
+   bool AreConditionsMet() { return g_sectionResults.entryConditionsMet; }
+   bool IsMomentumConfirmed() { return g_sectionResults.momentumConfirmed; }
+   bool IsEMAConfirmed() { return g_sectionResults.emaConfirmed; }
+   bool IsStructureConfirmed() { return g_sectionResults.structureConfirmed; }
+   bool IsZoneConfirmed() { return g_sectionResults.zoneConfirmed; }
+   string GetEntryType() { return g_sectionResults.entryType; }
+   int GetEntryQuality() { return g_sectionResults.entryQualityScore; }
+};
+
+//+------------------------------------------------------------------+
 //| Master SMC Analyzer - Calls All Modules                           |
 //+------------------------------------------------------------------+
 class CMasterSMC
@@ -1978,10 +2306,13 @@ private:
    // Section 6: MACD/RSI Momentum
    CMACDRSIAnalysis  m_macdRsi;
 
+   // Section 11: Entry Logic
+   CEntryLogic       m_entryLogic;
+
    // Section 12: Risk Management
    CRiskManagement   m_riskMgmt;
 
-   // Section 3-11: SMC Modules
+   // Section 3-10: SMC Modules
    CMarketStructure  m_structure;
    CFairValueGap     m_fvg;
    COrderBlock       m_orderBlock;
@@ -2047,8 +2378,11 @@ public:
       // Calculate HTF/LTF alignment (now uses EMA data)
       AnalyzeHTFLTFAlignment();
 
-      // Calculate confluence score (includes momentum now)
-      m_confluence.Calculate(); // Section 11
+      // Calculate confluence score
+      m_confluence.Calculate();
+
+      // Section 11: Entry Logic - Full section sync for signal generation
+      m_entryLogic.Analyze();
 
       // Section 12: Risk Management (after confluence for risk adjustment)
       m_riskMgmt.Analyze();
@@ -2135,6 +2469,22 @@ public:
    bool IsDrawdownOK() { return g_sectionResults.drawdownOK; }
    bool IsDailyLossOK() { return g_sectionResults.dailyLossOK; }
    bool IsInRecoveryMode() { return g_sectionResults.inRecoveryMode; }
+
+   // Section 11: Entry Logic Getters
+   bool AreEntryConditionsMet() { return g_sectionResults.entryConditionsMet; }
+   bool IsEntryMomentumConfirmed() { return g_sectionResults.momentumConfirmed; }
+   bool IsEntryEMAConfirmed() { return g_sectionResults.emaConfirmed; }
+   bool IsEntryStructureConfirmed() { return g_sectionResults.structureConfirmed; }
+   bool IsEntryZoneConfirmed() { return g_sectionResults.zoneConfirmed; }
+   string GetEntryType() { return g_sectionResults.entryType; }
+   int GetEntryQualityScore() { return g_sectionResults.entryQualityScore; }
+
+   // Section 5/9: Pullback Detection Getters
+   bool IsInPullbackZone() { return g_sectionResults.inPullbackZone; }
+   bool IsPullbackToBuy() { return g_sectionResults.pullbackToBuy; }
+   bool IsPullbackToSell() { return g_sectionResults.pullbackToSell; }
+   double GetPullbackDepth() { return g_sectionResults.pullbackDepth; }
+   string GetPullbackQuality() { return g_sectionResults.pullbackQuality; }
 };
 
 //+------------------------------------------------------------------+

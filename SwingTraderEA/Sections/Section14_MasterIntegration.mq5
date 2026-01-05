@@ -1202,11 +1202,23 @@ void PrintSMCDebug()
    Print("SEC10 | HTFAligned: ", g_analysis.htfAligned ? "YES" : "NO",
          " | LTFEntry: ", g_analysis.ltfEntry ? "YES" : "NO");
 
-   // Section 11: Confluence
+   // Section 11: Entry Logic (Full Section Sync)
    Print("SEC11 | Confluence: ", g_analysis.confluenceScore, "/10",
          " | Strength: ", g_analysis.signalStrength == SIGNAL_STRONG ? "STRONG" :
                           g_analysis.signalStrength == SIGNAL_MODERATE ? "MODERATE" :
                           g_analysis.signalStrength == SIGNAL_WEAK ? "WEAK" : "NONE");
+   Print("      | EntryType: ", g_sectionResults.entryType,
+         " | Quality: ", g_sectionResults.entryQualityScore, "/100",
+         " | ConditionsMet: ", g_sectionResults.entryConditionsMet ? "YES" : "NO");
+   Print("      | Confirmations: Structure=", g_sectionResults.structureConfirmed ? "Y" : "N",
+         " EMA=", g_sectionResults.emaConfirmed ? "Y" : "N",
+         " Momentum=", g_sectionResults.momentumConfirmed ? "Y" : "N",
+         " Zone=", g_sectionResults.zoneConfirmed ? "Y" : "N");
+   if(g_sectionResults.inPullbackZone)
+      Print("      | Pullback: ", g_sectionResults.pullbackQuality,
+            " (", DoubleToString(g_sectionResults.pullbackDepth * 100, 1), "% depth)",
+            " | ToBuy: ", g_sectionResults.pullbackToBuy ? "Y" : "N",
+            " ToSell: ", g_sectionResults.pullbackToSell ? "Y" : "N");
 
    // Section 12: Risk Management
    Print("SEC12 | Status: ", g_sectionResults.riskStatus,
@@ -1683,64 +1695,139 @@ void GenerateSignal()
    g_analysis.signalValid = false;
    g_analysis.direction = DIR_NONE;
 
-   // Check minimum requirements
+   // === SECTION 11: Entry Logic Check (Full Section Sync) ===
+   // Primary gate: Use CEntryLogic analysis which syncs all sections
+   if(!g_sectionResults.entryConditionsMet)
+   {
+      // Provide detailed reason based on which confirmations failed
+      string missingConf = "";
+      if(!g_sectionResults.structureConfirmed) missingConf += "Structure ";
+      if(!g_sectionResults.emaConfirmed) missingConf += "EMA ";
+      if(!g_sectionResults.momentumConfirmed) missingConf += "Momentum ";
+      if(!g_sectionResults.zoneConfirmed) missingConf += "Zone ";
+
+      if(g_sectionResults.entryType == "NONE")
+         g_analysis.signalReason = "No entry type (need Pullback/Breakout/Reversal)";
+      else if(missingConf != "")
+         g_analysis.signalReason = g_sectionResults.entryType + " missing: " + missingConf;
+      else
+         g_analysis.signalReason = "Entry conditions not met";
+      return;
+   }
+
+   // === SECTION 12: Risk Management Check ===
+   if(!g_sectionResults.canTrade)
+   {
+      g_analysis.signalReason = "Risk blocked: " + g_sectionResults.riskStatus;
+      return;
+   }
+
+   // Check minimum confluence (now more lenient since CEntryLogic pre-filters)
    if(g_analysis.confluenceScore < InpMinConfluence)
    {
       g_analysis.signalReason = "Low confluence: " + IntegerToString(g_analysis.confluenceScore);
       return;
    }
 
+   // === SECTION 10: HTF/LTF Alignment Check ===
    if(InpRequireHTFAlignment && !g_analysis.htfAligned)
    {
-      g_analysis.signalReason = "No HTF alignment";
+      g_analysis.signalReason = "No HTF/LTF alignment";
       return;
    }
 
+   // Session filter
    if(InpRequireSessionFilter && !g_analysis.sessionActive)
    {
       g_analysis.signalReason = "Outside active session";
       return;
    }
 
+   // News filter
    if(InpAvoidHighNews && g_analysis.newsUpcoming && g_analysis.minsToNews < InpNewsBufferMins)
    {
       g_analysis.signalReason = "News upcoming in " + IntegerToString(g_analysis.minsToNews) + " mins";
       return;
    }
 
-   // Determine direction
+   // Determine direction based on market trend and entry type
    bool buySignal = false;
    bool sellSignal = false;
 
-   // BUY conditions
-   if(g_analysis.trend == STRUCTURE_BULLISH)
+   // === Entry Type Based Signal Generation ===
+   if(g_sectionResults.entryType == "PULLBACK")
    {
-      if((!InpRequireOB || g_analysis.bullishOB) &&
-         (!InpRequireFVG || g_analysis.bullishFVG) &&
-         (!InpRequireOTE || g_analysis.inOTE) &&
-         (!InpRequireLiquidity || g_analysis.liquiditySwept) &&
-         (!InpRequireBOS || g_analysis.bosConfirmed))
-      {
+      // PULLBACK: Buy on bullish pullback, Sell on bearish pullback
+      if(g_sectionResults.pullbackToBuy && g_analysis.trend == STRUCTURE_BULLISH)
          buySignal = true;
+      else if(g_sectionResults.pullbackToSell && g_analysis.trend == STRUCTURE_BEARISH)
+         sellSignal = true;
+   }
+   else if(g_sectionResults.entryType == "BREAKOUT")
+   {
+      // BREAKOUT: Follow BOS direction with momentum confirmation
+      if(g_analysis.trend == STRUCTURE_BULLISH && g_sectionResults.bosConfirmed)
+         buySignal = true;
+      else if(g_analysis.trend == STRUCTURE_BEARISH && g_sectionResults.bosConfirmed)
+         sellSignal = true;
+   }
+   else if(g_sectionResults.entryType == "REVERSAL")
+   {
+      // REVERSAL: CHoCH or divergence with zone confirmation
+      if(g_sectionResults.chochDetected || g_sectionResults.macdDivergenceBullish)
+      {
+         if(g_sectionResults.zoneConfirmed && g_analysis.inDemandZone)
+            buySignal = true;
+      }
+      if(g_sectionResults.chochDetected || g_sectionResults.macdDivergenceBearish)
+      {
+         if(g_sectionResults.zoneConfirmed && g_analysis.inSupplyZone)
+            sellSignal = true;
       }
    }
 
-   // SELL conditions
-   if(g_analysis.trend == STRUCTURE_BEARISH)
+   // Fallback: Traditional SMC criteria if entry type logic didn't trigger
+   if(!buySignal && !sellSignal)
    {
-      if((!InpRequireOB || g_analysis.bearishOB) &&
-         (!InpRequireFVG || g_analysis.bearishFVG) &&
-         (!InpRequireOTE || g_analysis.inOTE) &&
-         (!InpRequireLiquidity || g_analysis.liquiditySwept) &&
-         (!InpRequireBOS || g_analysis.bosConfirmed))
+      // BUY conditions (legacy fallback)
+      if(g_analysis.trend == STRUCTURE_BULLISH)
       {
-         sellSignal = true;
+         if((!InpRequireOB || g_analysis.bullishOB) &&
+            (!InpRequireFVG || g_analysis.bullishFVG) &&
+            (!InpRequireOTE || g_analysis.inOTE) &&
+            (!InpRequireLiquidity || g_analysis.liquiditySwept) &&
+            (!InpRequireBOS || g_analysis.bosConfirmed))
+         {
+            buySignal = true;
+         }
+      }
+
+      // SELL conditions (legacy fallback)
+      if(g_analysis.trend == STRUCTURE_BEARISH)
+      {
+         if((!InpRequireOB || g_analysis.bearishOB) &&
+            (!InpRequireFVG || g_analysis.bearishFVG) &&
+            (!InpRequireOTE || g_analysis.inOTE) &&
+            (!InpRequireLiquidity || g_analysis.liquiditySwept) &&
+            (!InpRequireBOS || g_analysis.bosConfirmed))
+         {
+            sellSignal = true;
+         }
       }
    }
 
    if(!buySignal && !sellSignal)
    {
-      g_analysis.signalReason = "SMC criteria not met";
+      g_analysis.signalReason = "SMC criteria not met for " + g_sectionResults.entryType;
+      return;
+   }
+
+   // === Entry Quality Gate ===
+   // Require minimum quality score for execution (adjustable threshold)
+   int minQualityScore = 40;  // Minimum 40/100 quality for signal
+   if(g_sectionResults.entryQualityScore < minQualityScore)
+   {
+      g_analysis.signalReason = "Quality too low: " + IntegerToString(g_sectionResults.entryQualityScore) + "/100";
       return;
    }
 
@@ -1753,9 +1840,20 @@ void GenerateSignal()
       g_analysis.direction = DIR_BUY;
       g_analysis.entryPrice = currentPrice;
 
-      // SL below recent swing low or OB low
-      g_analysis.stopLoss = g_analysis.obLow > 0 ? g_analysis.obLow - atr * 0.2 :
-                            g_analysis.lastSwingLow - atr * 0.2;
+      // SL placement based on entry type
+      if(g_sectionResults.entryType == "PULLBACK")
+      {
+         // For pullbacks: SL below Fib 61.8% level or demand zone
+         g_analysis.stopLoss = g_sectionResults.fib618Level > 0 ?
+                               g_sectionResults.fib618Level - atr * 0.2 :
+                               g_analysis.lastSwingLow - atr * 0.2;
+      }
+      else
+      {
+         // For breakouts/reversals: SL below OB or swing low
+         g_analysis.stopLoss = g_analysis.obLow > 0 ? g_analysis.obLow - atr * 0.2 :
+                               g_analysis.lastSwingLow - atr * 0.2;
+      }
 
       double risk = g_analysis.entryPrice - g_analysis.stopLoss;
       g_analysis.takeProfit1 = g_analysis.entryPrice + (risk * InpTP1_RR);
@@ -1767,9 +1865,20 @@ void GenerateSignal()
       g_analysis.direction = DIR_SELL;
       g_analysis.entryPrice = currentPrice;
 
-      // SL above recent swing high or OB high
-      g_analysis.stopLoss = g_analysis.obHigh > 0 ? g_analysis.obHigh + atr * 0.2 :
-                            g_analysis.lastSwingHigh + atr * 0.2;
+      // SL placement based on entry type
+      if(g_sectionResults.entryType == "PULLBACK")
+      {
+         // For pullbacks: SL above Fib 61.8% level or supply zone
+         g_analysis.stopLoss = g_sectionResults.fib618Level > 0 ?
+                               g_sectionResults.fib618Level + atr * 0.2 :
+                               g_analysis.lastSwingHigh + atr * 0.2;
+      }
+      else
+      {
+         // For breakouts/reversals: SL above OB or swing high
+         g_analysis.stopLoss = g_analysis.obHigh > 0 ? g_analysis.obHigh + atr * 0.2 :
+                               g_analysis.lastSwingHigh + atr * 0.2;
+      }
 
       double risk = g_analysis.stopLoss - g_analysis.entryPrice;
       g_analysis.takeProfit1 = g_analysis.entryPrice - (risk * InpTP1_RR);
@@ -1778,8 +1887,11 @@ void GenerateSignal()
    }
 
    g_analysis.signalValid = true;
-   g_analysis.signalReason = (buySignal ? "BUY" : "SELL") + " - Confluence: " +
-                              IntegerToString(g_analysis.confluenceScore) + "/10";
+
+   // Enhanced signal reason with entry type and quality
+   g_analysis.signalReason = (buySignal ? "BUY" : "SELL") + " [" + g_sectionResults.entryType + "]" +
+                              " - C:" + IntegerToString(g_analysis.confluenceScore) + "/10" +
+                              " Q:" + IntegerToString(g_sectionResults.entryQualityScore) + "/100";
 
    g_status.lastSignalTime = TimeCurrent();
 }
