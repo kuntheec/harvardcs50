@@ -97,6 +97,13 @@ struct SectionResults
    double            obLow;
    int               obStrength;
    bool              obFresh;
+   // Volume Profile Enhancement (HVN/LVN)
+   bool              obInHVN;                  // OB is in High Volume Node
+   bool              obInLVN;                  // OB is in Low Volume Node
+   double            hvnLevel;                 // Nearest High Volume Node level
+   double            lvnLevel;                 // Nearest Low Volume Node level
+   double            obVolumeRatio;            // Volume ratio vs average (>1 = high volume)
+   string            volumeContext;            // "HVN", "LVN", "NORMAL"
 
    // Section 9: Fibonacci/OTE
    bool              inOTEZone;
@@ -115,12 +122,19 @@ struct SectionResults
    double            pullbackDepth;            // Current pullback depth (0-1)
    string            pullbackQuality;          // "SHALLOW", "OPTIMAL", "DEEP"
 
-   // Section 10: Killzones
+   // Section 10: Killzones & MTF Analysis
    bool              htfTrendBullish;
    bool              htfTrendBearish;
    bool              ltfEntryValid;
    bool              htfLtfAligned;
    double            htfPOI;
+   // MTF Divergence Detection
+   bool              mtfDivergence;            // HTF and LTF trend conflict
+   int               mtfDivergencePenalty;     // Confluence penalty (-1 to -3)
+   string            mtfDivergenceType;        // "NONE", "WEAK", "STRONG"
+   bool              ltfTrendBullish;          // LTF trend direction
+   bool              ltfTrendBearish;
+   bool              momentumDivergence;       // Momentum conflicts with structure
 
    // Section 11: Confluence & Entry Logic
    int               confluenceScore;
@@ -667,6 +681,9 @@ private:
    int               m_lookback;
    int               m_atrHandle;
    double            m_atrBuffer[];
+   int               m_volumeBins;            // Number of price bins for volume profile
+   double            m_hvnThreshold;          // Threshold for High Volume Node (>1.5x avg)
+   double            m_lvnThreshold;          // Threshold for Low Volume Node (<0.5x avg)
 
 public:
    void Init(string symbol, ENUM_TIMEFRAMES tf, int lookback = 50)
@@ -676,6 +693,9 @@ public:
       m_lookback = lookback;
       m_atrHandle = iATR(symbol, tf, 14);
       ArraySetAsSeries(m_atrBuffer, true);
+      m_volumeBins = 20;                      // Divide price range into 20 bins
+      m_hvnThreshold = 1.5;                   // 150% of average volume = HVN
+      m_lvnThreshold = 0.5;                   // 50% of average volume = LVN
    }
 
    void Analyze()
@@ -684,6 +704,12 @@ public:
       g_sectionResults.bearishOBPresent = false;
       g_sectionResults.priceInOB = false;
       g_sectionResults.obFresh = false;
+      g_sectionResults.obInHVN = false;
+      g_sectionResults.obInLVN = false;
+      g_sectionResults.hvnLevel = 0;
+      g_sectionResults.lvnLevel = 0;
+      g_sectionResults.obVolumeRatio = 0;
+      g_sectionResults.volumeContext = "NORMAL";
 
       // Error handling for CopyBuffer
       int copied = CopyBuffer(m_atrHandle, 0, 0, 3, m_atrBuffer);
@@ -696,6 +722,9 @@ public:
       double atr = m_atrBuffer[0];
       double currentPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
 
+      // === Volume Profile Analysis ===
+      AnalyzeVolumeProfile(currentPrice, atr);
+
       // Determine which OB type to prioritize based on market trend
       // Only show the dominant direction to avoid conflicting signals
       bool lookForBullish = (g_sectionResults.marketTrend == TREND_BULLISH ||
@@ -705,6 +734,7 @@ public:
 
       // In ranging market, pick first OB found and stop
       bool foundOB = false;
+      int obBarIndex = -1;
 
       for(int i = 1; i < m_lookback - 1 && !foundOB; i++)
       {
@@ -725,6 +755,7 @@ public:
             g_sectionResults.obLow = close;
             g_sectionResults.obStrength = (int)((body / atr) * 10);
             g_sectionResults.obFresh = (i <= 5);
+            obBarIndex = i;
 
             if(currentPrice >= close && currentPrice <= open)
                g_sectionResults.priceInOB = true;
@@ -744,6 +775,7 @@ public:
             g_sectionResults.obLow = open;
             g_sectionResults.obStrength = (int)((body / atr) * 10);
             g_sectionResults.obFresh = (i <= 5);
+            obBarIndex = i;
 
             if(currentPrice >= open && currentPrice <= close)
                g_sectionResults.priceInOB = true;
@@ -755,11 +787,160 @@ public:
                foundOB = true;
          }
       }
+
+      // === Analyze Volume at OB Level ===
+      if(foundOB && obBarIndex >= 0)
+      {
+         AnalyzeOBVolume(obBarIndex);
+      }
    }
 
+private:
+   void AnalyzeVolumeProfile(double currentPrice, double atr)
+   {
+      // Get price range for volume profile
+      double highestPrice = 0;
+      double lowestPrice = DBL_MAX;
+
+      for(int i = 0; i < m_lookback; i++)
+      {
+         double high = iHigh(m_symbol, m_timeframe, i);
+         double low = iLow(m_symbol, m_timeframe, i);
+         if(high > highestPrice) highestPrice = high;
+         if(low < lowestPrice) lowestPrice = low;
+      }
+
+      double priceRange = highestPrice - lowestPrice;
+      if(priceRange <= 0) return;
+
+      double binSize = priceRange / m_volumeBins;
+
+      // Create volume profile bins
+      double volumeProfile[];
+      ArrayResize(volumeProfile, m_volumeBins);
+      ArrayInitialize(volumeProfile, 0);
+
+      double totalVolume = 0;
+
+      // Accumulate volume in each price bin
+      for(int i = 0; i < m_lookback; i++)
+      {
+         double high = iHigh(m_symbol, m_timeframe, i);
+         double low = iLow(m_symbol, m_timeframe, i);
+         long volume = iVolume(m_symbol, m_timeframe, i);
+
+         // Distribute volume across price bins that the candle touches
+         int lowBin = (int)((low - lowestPrice) / binSize);
+         int highBin = (int)((high - lowestPrice) / binSize);
+
+         lowBin = MathMax(0, MathMin(lowBin, m_volumeBins - 1));
+         highBin = MathMax(0, MathMin(highBin, m_volumeBins - 1));
+
+         int binsSpanned = highBin - lowBin + 1;
+         double volumePerBin = (double)volume / binsSpanned;
+
+         for(int b = lowBin; b <= highBin; b++)
+         {
+            volumeProfile[b] += volumePerBin;
+         }
+         totalVolume += volume;
+      }
+
+      double avgVolume = totalVolume / m_volumeBins;
+
+      // Find HVN and LVN levels
+      double maxVolume = 0;
+      double minVolume = DBL_MAX;
+      int hvnBin = -1;
+      int lvnBin = -1;
+
+      for(int b = 0; b < m_volumeBins; b++)
+      {
+         if(volumeProfile[b] > maxVolume)
+         {
+            maxVolume = volumeProfile[b];
+            hvnBin = b;
+         }
+         if(volumeProfile[b] < minVolume && volumeProfile[b] > 0)
+         {
+            minVolume = volumeProfile[b];
+            lvnBin = b;
+         }
+      }
+
+      // Calculate HVN and LVN price levels
+      if(hvnBin >= 0)
+         g_sectionResults.hvnLevel = lowestPrice + (hvnBin + 0.5) * binSize;
+      if(lvnBin >= 0)
+         g_sectionResults.lvnLevel = lowestPrice + (lvnBin + 0.5) * binSize;
+
+      // Check if current price is in HVN or LVN zone
+      int currentBin = (int)((currentPrice - lowestPrice) / binSize);
+      currentBin = MathMax(0, MathMin(currentBin, m_volumeBins - 1));
+
+      double currentBinVolume = volumeProfile[currentBin];
+      g_sectionResults.obVolumeRatio = (avgVolume > 0) ? currentBinVolume / avgVolume : 0;
+
+      if(g_sectionResults.obVolumeRatio >= m_hvnThreshold)
+      {
+         g_sectionResults.obInHVN = true;
+         g_sectionResults.volumeContext = "HVN";
+      }
+      else if(g_sectionResults.obVolumeRatio <= m_lvnThreshold)
+      {
+         g_sectionResults.obInLVN = true;
+         g_sectionResults.volumeContext = "LVN";
+      }
+      else
+      {
+         g_sectionResults.volumeContext = "NORMAL";
+      }
+   }
+
+   void AnalyzeOBVolume(int obBarIndex)
+   {
+      // Get volume at the OB candle
+      long obVolume = iVolume(m_symbol, m_timeframe, obBarIndex);
+
+      // Calculate average volume over lookback
+      long totalVolume = 0;
+      for(int i = 0; i < m_lookback; i++)
+      {
+         totalVolume += iVolume(m_symbol, m_timeframe, i);
+      }
+      double avgVolume = (double)totalVolume / m_lookback;
+
+      // Update volume ratio for the OB specifically
+      if(avgVolume > 0)
+      {
+         double obVolumeRatio = obVolume / avgVolume;
+
+         // If OB has high volume, it's a stronger level (HVN)
+         if(obVolumeRatio >= m_hvnThreshold)
+         {
+            g_sectionResults.obInHVN = true;
+            g_sectionResults.volumeContext = "HVN";
+            g_sectionResults.obVolumeRatio = obVolumeRatio;
+            // Boost OB strength for high volume OBs
+            g_sectionResults.obStrength = MathMin(g_sectionResults.obStrength + 2, 10);
+         }
+         else if(obVolumeRatio <= m_lvnThreshold)
+         {
+            g_sectionResults.obInLVN = true;
+            g_sectionResults.volumeContext = "LVN";
+            g_sectionResults.obVolumeRatio = obVolumeRatio;
+         }
+      }
+   }
+
+public:
    bool HasBullishOB() { return g_sectionResults.bullishOBPresent; }
    bool HasBearishOB() { return g_sectionResults.bearishOBPresent; }
    bool IsPriceInOB() { return g_sectionResults.priceInOB; }
+   bool IsOBInHVN() { return g_sectionResults.obInHVN; }
+   bool IsOBInLVN() { return g_sectionResults.obInLVN; }
+   double GetHVNLevel() { return g_sectionResults.hvnLevel; }
+   double GetLVNLevel() { return g_sectionResults.lvnLevel; }
 };
 
 //+------------------------------------------------------------------+
@@ -2028,7 +2209,21 @@ public:
          score += 1;
       }
 
-      g_sectionResults.confluenceScore = MathMin(score, 10);
+      // HVN/LVN Volume Profile bonus (+1) - OB in high volume area is stronger
+      if(g_sectionResults.obInHVN && (g_sectionResults.bullishOBPresent || g_sectionResults.bearishOBPresent))
+      {
+         score += 1;
+      }
+
+      // === MTF DIVERGENCE PENALTY ===
+      // Apply penalty for conflicting timeframes (calculated in AnalyzeHTFLTFAlignment)
+      if(g_sectionResults.mtfDivergence)
+      {
+         score += g_sectionResults.mtfDivergencePenalty;  // Negative value
+      }
+
+      // Ensure score stays within 0-10 range
+      g_sectionResults.confluenceScore = MathMax(0, MathMin(score, 10));
 
       // Signal strength
       g_sectionResults.signalStrong = (score >= 8);
@@ -2390,29 +2585,93 @@ public:
 
    void AnalyzeHTFLTFAlignment()
    {
+      // Reset MTF divergence fields
+      g_sectionResults.mtfDivergence = false;
+      g_sectionResults.mtfDivergencePenalty = 0;
+      g_sectionResults.mtfDivergenceType = "NONE";
+      g_sectionResults.ltfTrendBullish = false;
+      g_sectionResults.ltfTrendBearish = false;
+      g_sectionResults.momentumDivergence = false;
+
       // HTF trend - enhanced with EMA confirmation
       g_sectionResults.htfTrendBullish = (g_sectionResults.marketTrend == TREND_BULLISH);
       g_sectionResults.htfTrendBearish = (g_sectionResults.marketTrend == TREND_BEARISH);
 
-      // LTF entry confirmation
-      double ltfClose = iClose(m_symbol, m_ltf, 0);
+      // === LTF Trend Analysis ===
+      // Analyze LTF trend using multiple bars for more accurate trend detection
+      double ltfClose0 = iClose(m_symbol, m_ltf, 0);
+      double ltfClose3 = iClose(m_symbol, m_ltf, 3);
       double ltfOpen = iOpen(m_symbol, m_ltf, 0);
+      double ltfHigh = iHigh(m_symbol, m_ltf, 0);
+      double ltfLow = iLow(m_symbol, m_ltf, 0);
+
+      // Determine LTF trend direction
+      bool ltfBullishCandle = (ltfClose0 > ltfOpen);
+      bool ltfBearishCandle = (ltfClose0 < ltfOpen);
+      bool ltfHigherClose = (ltfClose0 > ltfClose3);  // Making higher closes
+      bool ltfLowerClose = (ltfClose0 < ltfClose3);   // Making lower closes
+
+      g_sectionResults.ltfTrendBullish = ltfBullishCandle && ltfHigherClose;
+      g_sectionResults.ltfTrendBearish = ltfBearishCandle && ltfLowerClose;
 
       // Enhanced: Consider EMA alignment for stronger confirmation
       bool emaBullishConfirm = g_sectionResults.emaBullish && g_sectionResults.emaFast > g_sectionResults.emaSlow;
       bool emaBearishConfirm = g_sectionResults.emaBearish && g_sectionResults.emaFast < g_sectionResults.emaSlow;
 
-      if(g_sectionResults.htfTrendBullish && ltfClose > ltfOpen && emaBullishConfirm)
+      // === MTF Divergence Detection ===
+      // Check if HTF and LTF are in conflict
+      bool htfBull = g_sectionResults.htfTrendBullish;
+      bool htfBear = g_sectionResults.htfTrendBearish;
+      bool ltfBull = g_sectionResults.ltfTrendBullish;
+      bool ltfBear = g_sectionResults.ltfTrendBearish;
+
+      // Strong divergence: HTF and LTF show opposite trends
+      if((htfBull && ltfBear) || (htfBear && ltfBull))
+      {
+         g_sectionResults.mtfDivergence = true;
+         g_sectionResults.mtfDivergenceType = "STRONG";
+         g_sectionResults.mtfDivergencePenalty = -3;  // Severe penalty
+      }
+      // Weak divergence: HTF has trend but LTF is neutral/ranging
+      else if((htfBull && !ltfBull && !ltfBear) || (htfBear && !ltfBull && !ltfBear))
+      {
+         g_sectionResults.mtfDivergence = true;
+         g_sectionResults.mtfDivergenceType = "WEAK";
+         g_sectionResults.mtfDivergencePenalty = -1;  // Minor penalty
+      }
+
+      // === Momentum vs Structure Divergence ===
+      // Check if momentum (MACD) conflicts with structure trend
+      if(htfBull && g_sectionResults.macdBearish && !g_sectionResults.macdDivergenceBullish)
+      {
+         g_sectionResults.momentumDivergence = true;
+         g_sectionResults.mtfDivergencePenalty -= 1;  // Additional penalty
+      }
+      else if(htfBear && g_sectionResults.macdBullish && !g_sectionResults.macdDivergenceBearish)
+      {
+         g_sectionResults.momentumDivergence = true;
+         g_sectionResults.mtfDivergencePenalty -= 1;
+      }
+
+      // === LTF Entry Validation ===
+      g_sectionResults.ltfEntryValid = false;
+
+      if(g_sectionResults.htfTrendBullish && ltfBullishCandle && emaBullishConfirm)
          g_sectionResults.ltfEntryValid = true;
-      else if(g_sectionResults.htfTrendBearish && ltfClose < ltfOpen && emaBearishConfirm)
+      else if(g_sectionResults.htfTrendBearish && ltfBearishCandle && emaBearishConfirm)
          g_sectionResults.ltfEntryValid = true;
-      else if(g_sectionResults.htfTrendBullish && ltfClose > ltfOpen)
-         g_sectionResults.ltfEntryValid = true;  // Allow without EMA but less weight
-      else if(g_sectionResults.htfTrendBearish && ltfClose < ltfOpen)
+      else if(g_sectionResults.htfTrendBullish && ltfBullishCandle)
+         g_sectionResults.ltfEntryValid = true;  // Allow without EMA but weaker
+      else if(g_sectionResults.htfTrendBearish && ltfBearishCandle)
          g_sectionResults.ltfEntryValid = true;
 
+      // Don't validate entry if there's strong MTF divergence
+      if(g_sectionResults.mtfDivergenceType == "STRONG")
+         g_sectionResults.ltfEntryValid = false;
+
       g_sectionResults.htfLtfAligned = g_sectionResults.ltfEntryValid &&
-                                        (g_sectionResults.htfTrendBullish || g_sectionResults.htfTrendBearish);
+                                        (g_sectionResults.htfTrendBullish || g_sectionResults.htfTrendBearish) &&
+                                        !g_sectionResults.mtfDivergence;
    }
 
    // Getters for results

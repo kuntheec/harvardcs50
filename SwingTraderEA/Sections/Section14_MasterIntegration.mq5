@@ -1166,6 +1166,12 @@ void PrintSMCDebug()
    Print("SESSN | Session: ", sessionStr, " | Active: ", g_analysis.sessionActive ? "YES" : "NO",
          " | Killzone: ", g_sectionResults.inKillzone ? "YES" : "NO");
 
+   // News Filter
+   string newsStatus = g_analysis.newsUpcoming ? "UPCOMING" : "CLEAR";
+   Print("NEWS  | Status: ", newsStatus,
+         " | MinsToNews: ", g_analysis.minsToNews > 0 ? IntegerToString(g_analysis.minsToNews) : "N/A",
+         " | Filter: ", (g_analysis.newsUpcoming && g_analysis.minsToNews < InpNewsBufferMins) ? "BLOCKED" : "PASS");
+
    // Section 6: MACD/RSI Momentum
    Print("SEC 6 | MACD: ", DoubleToString(g_sectionResults.macdMain, 5),
          " | Signal: ", DoubleToString(g_sectionResults.macdSignal, 5),
@@ -1188,19 +1194,46 @@ void PrintSMCDebug()
          " | Mitigated: ", g_sectionResults.mitigatedFVGCount);
    Print("      | InFVG: ", g_analysis.bullishFVG || g_analysis.bearishFVG ? "YES" : "NO");
 
-   // Section 8: Order Blocks
+   // Section 8: Order Blocks (Enhanced with Volume Profile)
    Print("SEC 8 | BullOB: ", g_analysis.bullishOB ? "YES" : "NO",
-         " | BearOB: ", g_analysis.bearishOB ? "YES" : "NO");
+         " | BearOB: ", g_analysis.bearishOB ? "YES" : "NO",
+         " | Fresh: ", g_sectionResults.obFresh ? "YES" : "NO",
+         " | Strength: ", g_sectionResults.obStrength, "/10");
    if(g_analysis.bullishOB || g_analysis.bearishOB)
-      Print("      | OB Range: ", DoubleToString(g_analysis.obLow, 2), " - ", DoubleToString(g_analysis.obHigh, 2));
+   {
+      Print("      | OB Range: ", DoubleToString(g_analysis.obLow, _Digits), " - ", DoubleToString(g_analysis.obHigh, _Digits),
+            " | InOB: ", g_sectionResults.priceInOB ? "YES" : "NO");
+      Print("      | Volume: ", g_sectionResults.volumeContext,
+            " (", DoubleToString(g_sectionResults.obVolumeRatio, 2), "x avg)",
+            " | HVN: ", g_sectionResults.obInHVN ? "YES" : "NO",
+            " | LVN: ", g_sectionResults.obInLVN ? "YES" : "NO");
+   }
+   if(g_sectionResults.hvnLevel > 0 || g_sectionResults.lvnLevel > 0)
+      Print("      | HVN Level: ", DoubleToString(g_sectionResults.hvnLevel, _Digits),
+            " | LVN Level: ", DoubleToString(g_sectionResults.lvnLevel, _Digits));
 
-   // Section 9: Fibonacci/OTE
+   // Section 9: Fibonacci/OTE (Enhanced)
    Print("SEC 9 | InOTE: ", g_analysis.inOTE ? "YES" : "NO",
-         " | FibLevel: ", DoubleToString(g_analysis.fibLevel * 100, 1), "%");
+         " | CurrentFib: ", DoubleToString(g_analysis.fibLevel * 100, 1), "%",
+         " | InPullback: ", g_sectionResults.inPullbackZone ? "YES" : "NO");
+   Print("      | Fib38.2: ", DoubleToString(g_sectionResults.fib382Level, _Digits),
+         " | Fib50: ", DoubleToString(g_sectionResults.fib50Level, _Digits),
+         " | Fib61.8: ", DoubleToString(g_sectionResults.fib618Level, _Digits));
+   if(g_sectionResults.inOTEZone || g_sectionResults.inPullbackZone)
+      Print("      | OTE Range: ", DoubleToString(g_sectionResults.oteLow, _Digits),
+            " - ", DoubleToString(g_sectionResults.oteHigh, _Digits),
+            " | PullbackDepth: ", DoubleToString(g_sectionResults.pullbackDepth * 100, 1), "%",
+            " (", g_sectionResults.pullbackQuality, ")");
 
-   // Section 10: HTF/LTF
+   // Section 10: HTF/LTF & MTF Divergence
    Print("SEC10 | HTFAligned: ", g_analysis.htfAligned ? "YES" : "NO",
-         " | LTFEntry: ", g_analysis.ltfEntry ? "YES" : "NO");
+         " | LTFEntry: ", g_analysis.ltfEntry ? "YES" : "NO",
+         " | HTF: ", g_sectionResults.htfTrendBullish ? "BULL" : g_sectionResults.htfTrendBearish ? "BEAR" : "NONE",
+         " | LTF: ", g_sectionResults.ltfTrendBullish ? "BULL" : g_sectionResults.ltfTrendBearish ? "BEAR" : "NONE");
+   if(g_sectionResults.mtfDivergence)
+      Print("      | MTF Divergence: ", g_sectionResults.mtfDivergenceType,
+            " | Penalty: ", g_sectionResults.mtfDivergencePenalty,
+            " | MomentumDiv: ", g_sectionResults.momentumDivergence ? "YES" : "NO");
 
    // Section 11: Entry Logic (Full Section Sync)
    Print("SEC11 | Confluence: ", g_analysis.confluenceScore, "/10",
