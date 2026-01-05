@@ -843,7 +843,7 @@ private:
          {
             volumeProfile[b] += volumePerBin;
          }
-         totalVolume += volume;
+         totalVolume += (double)volume;
       }
 
       double avgVolume = totalVolume / m_volumeBins;
