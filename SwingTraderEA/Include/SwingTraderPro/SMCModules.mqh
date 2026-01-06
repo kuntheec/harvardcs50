@@ -913,7 +913,7 @@ private:
       // Update volume ratio for the OB specifically
       if(avgVolume > 0)
       {
-         double obVolumeRatio = obVolume / avgVolume;
+         double obVolumeRatio = (double)obVolume / avgVolume;
 
          // If OB has high volume, it's a stronger level (HVN)
          if(obVolumeRatio >= m_hvnThreshold)
