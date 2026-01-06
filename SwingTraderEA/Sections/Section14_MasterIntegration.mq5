@@ -1166,9 +1166,11 @@ void PrintSMCDebug()
    Print("SESSN | Session: ", sessionStr, " | Active: ", g_analysis.sessionActive ? "YES" : "NO",
          " | Killzone: ", g_sectionResults.inKillzone ? "YES" : "NO");
 
-   // News Filter
+   // News Filter (Enhanced per Grok's feedback)
    string newsStatus = g_analysis.newsUpcoming ? "UPCOMING" : "CLEAR";
+   string newsImpact = g_analysis.newsUpcoming ? "HIGH" : "NONE";  // Assume high impact if upcoming
    Print("NEWS  | Status: ", newsStatus,
+         " | Impact: ", newsImpact,
          " | MinsToNews: ", g_analysis.minsToNews > 0 ? IntegerToString(g_analysis.minsToNews) : "N/A",
          " | Filter: ", (g_analysis.newsUpcoming && g_analysis.minsToNews < InpNewsBufferMins) ? "BLOCKED" : "PASS");
 
@@ -1194,11 +1196,15 @@ void PrintSMCDebug()
          " | Mitigated: ", g_sectionResults.mitigatedFVGCount);
    Print("      | InFVG: ", g_analysis.bullishFVG || g_analysis.bearishFVG ? "YES" : "NO");
 
-   // Section 8: Order Blocks (Enhanced with Volume Profile)
+   // Section 8: Order Blocks (Enhanced with Volume Profile per Grok's feedback)
+   // Liquidity label based on HVN/LVN
+   string liqLabel = g_sectionResults.obInHVN ? "HIGH" :
+                     g_sectionResults.obInLVN ? "LOW" : "MED";
    Print("SEC 8 | BullOB: ", g_analysis.bullishOB ? "YES" : "NO",
          " | BearOB: ", g_analysis.bearishOB ? "YES" : "NO",
          " | Fresh: ", g_sectionResults.obFresh ? "YES" : "NO",
-         " | Strength: ", g_sectionResults.obStrength, "/10");
+         " | Strength: ", g_sectionResults.obStrength, "/10",
+         " | Liquidity: ", liqLabel);
    if(g_analysis.bullishOB || g_analysis.bearishOB)
    {
       Print("      | OB Range: ", DoubleToString(g_analysis.obLow, _Digits), " - ", DoubleToString(g_analysis.obHigh, _Digits),
@@ -1225,15 +1231,14 @@ void PrintSMCDebug()
             " | PullbackDepth: ", DoubleToString(g_sectionResults.pullbackDepth * 100, 1), "%",
             " (", g_sectionResults.pullbackQuality, ")");
 
-   // Section 10: HTF/LTF & MTF Divergence
+   // Section 10: HTF/LTF & MTF Divergence (Always show penalty per Grok's feedback)
    Print("SEC10 | HTFAligned: ", g_analysis.htfAligned ? "YES" : "NO",
          " | LTFEntry: ", g_analysis.ltfEntry ? "YES" : "NO",
          " | HTF: ", g_sectionResults.htfTrendBullish ? "BULL" : g_sectionResults.htfTrendBearish ? "BEAR" : "NONE",
          " | LTF: ", g_sectionResults.ltfTrendBullish ? "BULL" : g_sectionResults.ltfTrendBearish ? "BEAR" : "NONE");
-   if(g_sectionResults.mtfDivergence)
-      Print("      | MTF Divergence: ", g_sectionResults.mtfDivergenceType,
-            " | Penalty: ", g_sectionResults.mtfDivergencePenalty,
-            " | MomentumDiv: ", g_sectionResults.momentumDivergence ? "YES" : "NO");
+   Print("      | Divergence: ", g_sectionResults.mtfDivergenceType,
+         " | Penalty: ", g_sectionResults.mtfDivergencePenalty,
+         " | MomentumDiv: ", g_sectionResults.momentumDivergence ? "YES" : "NO");
 
    // Section 11: Entry Logic (Full Section Sync)
    Print("SEC11 | Confluence: ", g_analysis.confluenceScore, "/10",
