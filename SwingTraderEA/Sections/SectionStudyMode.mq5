@@ -1271,7 +1271,7 @@ void AnalyzeSection13_Execution()
    AnalyzeSection12_Risk();
 
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double spread = SymbolInfoDouble(_Symbol, SYMBOL_SPREAD) * g_symbolInfo.point;
+   double spread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * g_symbolInfo.point;
 
    if(g_results.entrySignal && g_results.entryDirection == "BUY")
    {
